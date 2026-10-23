@@ -1,0 +1,739 @@
+<Window x:Class="PingPilot.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:PingPilot"
+        Title="PingPilot"
+        Height="800" Width="1280"
+        MinHeight="520" MinWidth="760"
+        WindowStartupLocation="CenterScreen"
+        StateChanged="MainWindow_StateChanged"
+        PreviewMouseWheel="Window_PreviewMouseWheel"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        Style="{StaticResource AppWindow}">
+
+    <TabControl x:Name="MainTabs" Style="{StaticResource MainTabControl}">
+        <!-- Масштаб интерфейса: Ctrl + колесо мыши, Ctrl + «+» / «-», Ctrl + 0 — сбросить. -->
+        <TabControl.LayoutTransform>
+            <ScaleTransform x:Name="UiScale" ScaleX="1" ScaleY="1"/>
+        </TabControl.LayoutTransform>
+
+        <!-- ===== Дашборд ===== -->
+        <TabItem Header="Дашборд">
+            <Grid Margin="28,24,28,20">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="0,0,0,16">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Верхняя строка: слева группа, справа главные действия.
+                         При нехватке места левая часть переносится на новую строку. -->
+                    <Grid Grid.Row="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <WrapPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                            <ComboBox x:Name="GroupCombo"
+                                      Width="220"
+                                      Margin="0,0,8,0"
+                                      FontSize="15"
+                                      FontWeight="SemiBold"
+                                      DisplayMemberPath="Name"
+                                      SelectionChanged="GroupCombo_SelectionChanged"/>
+                            <Button Content="+ Группа"
+                                    Style="{StaticResource GhostButton}"
+                                    Click="AddGroupButton_Click"/>
+                            <Button Content="Переименовать"
+                                    Style="{StaticResource GhostButton}"
+                                    Click="RenameGroupButton_Click"/>
+                            <Button Content="Удалить"
+                                    Style="{StaticResource DangerButton}"
+                                    Click="DeleteGroupButton_Click"/>
+                        </WrapPanel>
+
+                        <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                    VerticalAlignment="Top" Margin="12,0,0,0">
+                            <Button Content="Проверить все"
+                                    Margin="0,0,10,0"
+                                    Click="RefreshButton_Click"/>
+                            <Button Content="+ Компьютер"
+                                    Style="{StaticResource PrimaryButton}"
+                                    Click="AddComputerButton_Click"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Сводка занимает всю ширину и переносится по словам. -->
+                    <TextBlock x:Name="SummaryText"
+                               Grid.Row="1"
+                               Foreground="{DynamicResource MutedBrush}"
+                               FontSize="15"
+                               Margin="2,14,0,0"
+                               TextWrapping="Wrap"/>
+
+                    <!-- Вид и сортировка переносятся, если окно узкое. -->
+                    <WrapPanel Grid.Row="2" Margin="0,10,0,0" Orientation="Horizontal">
+                        <TextBlock Text="Вид"
+                                   Foreground="{DynamicResource MutedBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"/>
+                        <ComboBox x:Name="TileVisualizationCombo"
+                                  Width="140"
+                                  Margin="0,0,20,0"
+                                  SelectedIndex="0"
+                                  SelectionChanged="TileVisualizationCombo_SelectionChanged">
+                            <ComboBoxItem Content="График" Tag="Graph"/>
+                            <ComboBoxItem Content="Матрица" Tag="Matrix"/>
+                        </ComboBox>
+                        <TextBlock Text="Сортировка"
+                                   Foreground="{DynamicResource MutedBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"/>
+                        <ComboBox x:Name="SortCombo"
+                                  Width="280"
+                                  SelectedIndex="0"
+                                  SelectionChanged="SortCombo_SelectionChanged">
+                            <ComboBoxItem Content="Порядок добавления"/>
+                            <ComboBoxItem Content="Пинг: от меньшего к большему"/>
+                            <ComboBoxItem Content="Пинг: от большего к меньшему"/>
+                            <ComboBoxItem Content="Цвет: зелёные первыми"/>
+                            <ComboBoxItem Content="Цвет: проблемные первыми"/>
+                            <ComboBoxItem Content="Имя: А → Я"/>
+                        </ComboBox>
+                    </WrapPanel>
+                </Grid>
+
+                <ScrollViewer Grid.Row="1"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <Grid>
+                        <ItemsControl x:Name="TileList">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <!-- Колонки и размер плиток подбираются под ширину окна. -->
+                                    <local:ResponsiveTilePanel MinTileWidth="260"
+                                                               MaxTileWidth="440"
+                                                               MinTileHeight="270"
+                                                               HeightRatio="0.95"
+                                                               Spacing="16"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Button Style="{StaticResource TileButton}"
+                                            Click="Tile_Click"
+                                            ToolTip="{Binding Tooltip}">
+                                        <Button.ContextMenu>
+                                            <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                                <MenuItem Header="Проверить сейчас"
+                                                          Click="TilePingNow_Click"/>
+                                                <MenuItem Header="Копировать адрес"
+                                                          Click="TileCopyHost_Click"/>
+                                                <Separator/>
+                                                <MenuItem Header="Подробности и изменение..."
+                                                          Click="TileEdit_Click"/>
+                                                <MenuItem Header="Удалить компьютер"
+                                                          Click="TileDelete_Click"/>
+                                            </ContextMenu>
+                                        </Button.ContextMenu>
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="4"/>
+                                                <RowDefinition Height="*"/>
+                                            </Grid.RowDefinitions>
+
+                                            <!-- Цветная полоса сверху: статус виден с первого взгляда. -->
+                                            <Border Background="{Binding StatusBrush}"
+                                                    CornerRadius="9,9,0,0"/>
+
+                                            <Grid Grid.Row="1" Margin="16,12,16,14">
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="*"/>
+                                                </Grid.RowDefinitions>
+
+                                                <TextBlock Grid.Row="0"
+                                                           Text="{Binding Name}"
+                                                           Foreground="{DynamicResource TextBrush}"
+                                                           FontSize="17"
+                                                           FontWeight="SemiBold"
+                                                           TextTrimming="CharacterEllipsis"/>
+
+                                                <TextBlock Grid.Row="1"
+                                                           Text="{Binding Description}"
+                                                           Foreground="{DynamicResource MutedBrush}"
+                                                           FontSize="13"
+                                                           TextTrimming="CharacterEllipsis">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Description}" Value="">
+                                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+
+                                                <TextBlock Grid.Row="2"
+                                                           Text="{Binding IpAddressLabel}"
+                                                           Foreground="{DynamicResource MutedBrush}"
+                                                           FontSize="13"
+                                                           TextTrimming="CharacterEllipsis"/>
+
+                                                <!-- Главное число: задержка. Слева статус с цветной точкой. -->
+                                                <Grid Grid.Row="3" Margin="0,10,0,0">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Orientation="Horizontal"
+                                                                VerticalAlignment="Center">
+                                                        <Ellipse Width="10" Height="10"
+                                                                 Fill="{Binding StatusBrush}"
+                                                                 VerticalAlignment="Center"
+                                                                 Margin="0,1,8,0"/>
+                                                        <TextBlock Text="{Binding StatusLabel}"
+                                                                   Foreground="{DynamicResource TextBrush}"
+                                                                   FontSize="14"
+                                                                   FontWeight="SemiBold"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                    </StackPanel>
+                                                    <TextBlock Grid.Column="1"
+                                                               Text="{Binding LatencyText}"
+                                                               Foreground="{DynamicResource TextBrush}"
+                                                               FontSize="24"
+                                                               FontWeight="SemiBold"
+                                                               Margin="8,0,0,0"/>
+                                                </Grid>
+
+                                                <StackPanel Grid.Row="4"
+                                                            Orientation="Horizontal"
+                                                            Margin="0,2,0,0">
+                                                    <TextBlock Text="{Binding PacketLossText}"
+                                                               Foreground="{DynamicResource MutedBrush}"
+                                                               FontSize="12"/>
+                                                    <TextBlock Text="·"
+                                                               Foreground="{DynamicResource MutedBrush}"
+                                                               FontSize="12"
+                                                               Margin="8,0,8,0"/>
+                                                    <TextBlock Text="{Binding LastCheckedText}"
+                                                               Foreground="{DynamicResource MutedBrush}"
+                                                               FontSize="12"/>
+                                                </StackPanel>
+
+                                                <Grid Grid.Row="5" Margin="0,8,0,0" MinHeight="90" ClipToBounds="True">
+                                                    <local:PingGraph Tile="{Binding}">
+                                                        <local:PingGraph.Style>
+                                                            <Style TargetType="local:PingGraph">
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding VisualizationMode}" Value="Matrix">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </local:PingGraph.Style>
+                                                    </local:PingGraph>
+                                                    <local:PingMatrix Tile="{Binding}">
+                                                        <local:PingMatrix.Style>
+                                                            <Style TargetType="local:PingMatrix">
+                                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding VisualizationMode}" Value="Matrix">
+                                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </local:PingMatrix.Style>
+                                                    </local:PingMatrix>
+                                                </Grid>
+                                            </Grid>
+                                        </Grid>
+                                    </Button>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <TextBlock x:Name="EmptyText"
+                                   Foreground="{DynamicResource MutedBrush}"
+                                   FontSize="16"
+                                   TextWrapping="Wrap"
+                                   TextAlignment="Center"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Top"
+                                   MaxWidth="520"
+                                   Margin="0,90,0,0"
+                                   IsHitTestVisible="False"/>
+                    </Grid>
+                </ScrollViewer>
+            </Grid>
+        </TabItem>
+
+        <!-- ===== Сканер сети ===== -->
+        <TabItem Header="Сканер">
+            <Grid Margin="28,24,28,20">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Панель настроек: что сканируем, автосканирование и фильтры. -->
+                <Border Grid.Row="0" Style="{StaticResource Card}" Padding="18,16,18,10">
+                    <StackPanel>
+                        <TextBlock Text="ЧТО СКАНИРУЕМ" Style="{StaticResource SectionTitle}" Margin="0,0,0,10"/>
+
+                        <WrapPanel VerticalAlignment="Center">
+                            <ComboBox x:Name="ScanTargetModeCombo"
+                                      Width="190" Margin="0,0,10,8">
+                                <ComboBoxItem Content="Локальная сеть" Tag="LocalNetwork"/>
+                                <ComboBoxItem Content="Диапазон IP" Tag="IpRange"/>
+                            </ComboBox>
+                            <ComboBox x:Name="NetworkCombo"
+                                      Width="340" Margin="0,0,10,8"/>
+                            <StackPanel x:Name="RangeTargetPanel"
+                                        Orientation="Horizontal"
+                                        Visibility="Collapsed"
+                                        Margin="0,0,10,8">
+                                <TextBlock Text="От" VerticalAlignment="Center" Margin="0,0,8,0"
+                                           Foreground="{DynamicResource MutedBrush}"/>
+                                <TextBox x:Name="RangeStartBox" Width="140"
+                                         Margin="0,0,12,0"
+                                         ToolTip="Начальный IPv4-адрес, например 192.168.1.1"
+                                         LostFocus="ScanTargetInputs_LostFocus"/>
+                                <TextBlock Text="До" VerticalAlignment="Center" Margin="0,0,8,0"
+                                           Foreground="{DynamicResource MutedBrush}"/>
+                                <TextBox x:Name="RangeEndBox" Width="140"
+                                         ToolTip="Конечный IPv4-адрес, например 192.168.1.254"
+                                         LostFocus="ScanTargetInputs_LostFocus"/>
+                            </StackPanel>
+                            <Button x:Name="RefreshNetworksButton"
+                                    Content="Обновить сети"
+                                    Margin="0,0,10,8"
+                                    Click="RefreshNetworksButton_Click"/>
+                            <Button x:Name="ScanButton"
+                                    Content="Сканировать"
+                                    Style="{StaticResource PrimaryButton}"
+                                    MinWidth="140"
+                                    Margin="0,0,10,8"
+                                    Click="ScanButton_Click"/>
+                            <Button x:Name="StopScanButton"
+                                    Content="Остановить"
+                                    Margin="0,0,0,8"
+                                    IsEnabled="False"
+                                    Click="StopScanButton_Click"/>
+                        </WrapPanel>
+
+                        <Border Height="1" Background="{DynamicResource LineBrush}" Margin="0,4,0,14"/>
+
+                        <WrapPanel VerticalAlignment="Center">
+                            <CheckBox x:Name="AutoScanCheckBox"
+                                      Content="Автосканирование"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,16,8"
+                                      Checked="AutoScanCheckBox_Changed"
+                                      Unchecked="AutoScanCheckBox_Changed"/>
+                            <TextBlock Text="Интервал, сек."
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,8,8"
+                                       Foreground="{DynamicResource MutedBrush}"/>
+                            <TextBox x:Name="AutoScanIntervalBox" Text="60"
+                                     Width="72" Margin="0,0,16,8"
+                                     LostFocus="AutoScanIntervalBox_LostFocus"/>
+                            <TextBlock x:Name="AutoScanStatusText"
+                                       Text="Автосканирование выключено"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,28,8"
+                                       Foreground="{DynamicResource MutedBrush}"/>
+                            <TextBlock Text="Фильтр"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,8,8"
+                                       Foreground="{DynamicResource MutedBrush}"/>
+                            <TextBox x:Name="FilterTextBox"
+                                     Width="190" Margin="0,0,16,8"
+                                     ToolTip="Поиск по имени или IP-адресу"
+                                     TextChanged="FilterTextBox_TextChanged"/>
+                            <CheckBox x:Name="DnsOnlyCheckBox"
+                                      Content="Только с DNS-именем"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,16,8"
+                                      Checked="ResultFilter_Changed"
+                                      Unchecked="ResultFilter_Changed"/>
+                            <ComboBox x:Name="MaxLatencyCombo"
+                                      Width="180" Margin="0,0,0,8"
+                                      SelectedValuePath="Tag"
+                                      ToolTip="Ограничить результаты по времени отклика">
+                                <ComboBoxItem Content="Любая задержка" Tag="0"/>
+                                <ComboBoxItem Content="До 10 ms" Tag="10"/>
+                                <ComboBoxItem Content="До 50 ms" Tag="50"/>
+                                <ComboBoxItem Content="До 100 ms" Tag="100"/>
+                                <ComboBoxItem Content="До 250 ms" Tag="250"/>
+                                <ComboBoxItem Content="До 500 ms" Tag="500"/>
+                            </ComboBox>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Прогресс и статус сканирования. -->
+                <StackPanel Grid.Row="1" Margin="0,16,0,12">
+                    <ProgressBar x:Name="ScanProgress"/>
+                    <DockPanel Margin="0,8,0,0" LastChildFill="True">
+                        <TextBlock x:Name="FilterSummaryText"
+                                   DockPanel.Dock="Right"
+                                   Foreground="{DynamicResource MutedBrush}"
+                                   Margin="16,0,0,0"/>
+                        <TextBlock x:Name="ScanStatusText"
+                                   Foreground="{DynamicResource MutedBrush}"
+                                   TextWrapping="Wrap"/>
+                    </DockPanel>
+                </StackPanel>
+
+                <Border Grid.Row="2" Style="{StaticResource Card}" Padding="1">
+                    <DataGrid x:Name="ResultsGrid"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserAddRows="False"
+                              SelectionMode="Extended">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Имя / DNS" Binding="{Binding Name}" Width="2*"/>
+                            <DataGridTextColumn Header="IP-адрес" Binding="{Binding IpAddress}" Width="190"/>
+                            <DataGridTextColumn Header="Задержка" Binding="{Binding LatencyMs, StringFormat={}{0} ms}" Width="130"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Border>
+
+                <Button x:Name="AddFoundButton"
+                        Grid.Row="3"
+                        Content="Добавить выбранные в группу..."
+                        Style="{StaticResource PrimaryButton}"
+                        HorizontalAlignment="Left"
+                        Margin="0,16,0,0"
+                        Click="AddFoundButton_Click"/>
+            </Grid>
+        </TabItem>
+
+        <!-- ===== Сессии мониторинга ===== -->
+        <TabItem Header="Сессии">
+            <Grid Margin="28,24,28,20">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="2*" MinHeight="120"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="3*" MinHeight="200"/>
+                </Grid.RowDefinitions>
+
+                <DockPanel Grid.Row="0" Margin="0,0,0,14" LastChildFill="True">
+                    <WrapPanel DockPanel.Dock="Right" Orientation="Horizontal" MaxWidth="560" VerticalAlignment="Center">
+                        <Button Content="Текущая сессия"
+                                Margin="10,0,0,0"
+                                Click="ShowCurrentSessionButton_Click"/>
+                        <Button Content="Обновить"
+                                Margin="10,0,0,0"
+                                Click="RefreshSessionsButton_Click"/>
+                        <Button Content="Удалить сессию"
+                                Style="{StaticResource DangerButton}"
+                                Margin="10,0,0,0"
+                                Click="DeleteSessionButton_Click"/>
+                    </WrapPanel>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Сохранённые сессии"
+                                   FontSize="18"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextBrush}"/>
+                        <TextBlock Text="Новые отображаются сверху"
+                                   Style="{StaticResource Hint}"
+                                   Margin="0,2,0,0"/>
+                    </StackPanel>
+                </DockPanel>
+
+                <Border Grid.Row="1" Style="{StaticResource Card}" Padding="1">
+                    <DataGrid x:Name="SessionsGrid"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserAddRows="False"
+                              CanUserSortColumns="True"
+                              SelectionMode="Single"
+                              SelectionChanged="SessionsGrid_SelectionChanged">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Группа"
+                                                Binding="{Binding GroupName}"
+                                                SortMemberPath="GroupName" Width="*"/>
+                            <DataGridTextColumn Header="Начало"
+                                                Binding="{Binding StartedAt, StringFormat={}{0:dd.MM.yyyy HH:mm:ss}}"
+                                                SortMemberPath="StartedAt" Width="170"/>
+                            <DataGridTextColumn Header="Завершение"
+                                                Binding="{Binding EndedAt, StringFormat={}{0:dd.MM.yyyy HH:mm:ss}}"
+                                                SortMemberPath="EndedAt" Width="170"/>
+                            <DataGridTextColumn Header="Компьютеров"
+                                                Binding="{Binding ComputerCount}"
+                                                SortMemberPath="ComputerCount" Width="120"/>
+                            <DataGridTextColumn Header="Записей"
+                                                Binding="{Binding EntryCount}"
+                                                SortMemberPath="EntryCount" Width="90"/>
+                            <DataGridTextColumn Header="Длительность"
+                                                Binding="{Binding DurationText}"
+                                                SortMemberPath="DurationText" Width="130"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Border>
+
+                <TextBlock x:Name="SessionViewHeaderText"
+                           Grid.Row="2"
+                           Margin="2,16,0,10"
+                           Text="Текущая сессия"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource MutedBrush}"
+                           TextWrapping="Wrap"/>
+
+                <TabControl Grid.Row="3">
+                    <TabItem Header="Матрица и график">
+                        <Grid Margin="0,14,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*" MinWidth="320"/>
+                                <ColumnDefinition Width="3*" MinWidth="380"/>
+                            </Grid.ColumnDefinitions>
+
+                            <ScrollViewer Grid.Column="0"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled"
+                                          Margin="0,0,14,0">
+                                <ItemsControl x:Name="SessionTileList">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <local:ResponsiveTilePanel MinTileWidth="190"
+                                                                       MaxTileWidth="280"
+                                                                       MinTileHeight="128"
+                                                                       HeightRatio="0.6"
+                                                                       Spacing="12"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Style="{StaticResource TileButton}"
+                                                    Click="SessionTile_Click"
+                                                    ToolTip="{Binding Tooltip}">
+                                                <Grid>
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="4"/>
+                                                        <RowDefinition Height="*"/>
+                                                    </Grid.RowDefinitions>
+                                                    <Border Background="{Binding StatusBrush}"
+                                                            CornerRadius="9,9,0,0"/>
+                                                    <StackPanel Grid.Row="1" Margin="14,10,14,10">
+                                                        <TextBlock Text="{Binding Name}"
+                                                                   Foreground="{DynamicResource TextBrush}"
+                                                                   FontSize="15" FontWeight="SemiBold"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                        <TextBlock Text="{Binding IpAddressLabel}"
+                                                                   Foreground="{DynamicResource MutedBrush}"
+                                                                   FontSize="12" Margin="0,2,0,0"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                        <Grid Margin="0,10,0,0">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <StackPanel Orientation="Horizontal"
+                                                                        VerticalAlignment="Center">
+                                                                <Ellipse Width="9" Height="9"
+                                                                         Fill="{Binding StatusBrush}"
+                                                                         Margin="0,1,7,0"/>
+                                                                <TextBlock Text="{Binding StatusLabel}"
+                                                                           Foreground="{DynamicResource TextBrush}"
+                                                                           FontSize="13" FontWeight="SemiBold"
+                                                                           TextTrimming="CharacterEllipsis"/>
+                                                            </StackPanel>
+                                                            <TextBlock Grid.Column="1"
+                                                                       Text="{Binding LatencyText}"
+                                                                       Foreground="{DynamicResource TextBrush}"
+                                                                       FontSize="17" FontWeight="SemiBold"
+                                                                       Margin="6,0,0,0"/>
+                                                        </Grid>
+                                                        <TextBlock Text="{Binding PacketLossText}"
+                                                                   Foreground="{DynamicResource MutedBrush}"
+                                                                   FontSize="12" Margin="0,6,0,0"/>
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+
+                            <Border Grid.Column="1" Style="{StaticResource Card}">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock x:Name="SessionSelectedComputerText"
+                                               Text="Выберите компьютер в матрице, чтобы посмотреть его график"
+                                               FontSize="15" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource TextBrush}"
+                                               TextWrapping="Wrap" Margin="0,0,0,12"/>
+                                    <local:PingGraph x:Name="SessionGraph"
+                                                     Grid.Row="1" MinHeight="180"
+                                                     UseMiniHistory="False"/>
+                                </Grid>
+                            </Border>
+                        </Grid>
+                    </TabItem>
+                    <TabItem Header="Журнал событий">
+                        <Border Style="{StaticResource Card}" Padding="1" Margin="0,14,0,0">
+                            <DataGrid x:Name="SessionRecordsGrid"
+                                      AutoGenerateColumns="False"
+                                      IsReadOnly="True"
+                                      CanUserAddRows="False"
+                                      CanUserSortColumns="True"
+                                      EnableRowVirtualization="True"
+                                      VirtualizingPanel.IsVirtualizing="True"
+                                      VirtualizingPanel.VirtualizationMode="Recycling">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Время"
+                                                        Binding="{Binding Timestamp, StringFormat={}{0:dd.MM.yyyy HH:mm:ss.fff}}"
+                                                        SortMemberPath="Timestamp" Width="210"/>
+                                    <DataGridTextColumn Header="Группа" Binding="{Binding GroupName}" Width="*"/>
+                                    <DataGridTextColumn Header="Компьютер" Binding="{Binding ComputerName}" Width="1.3*"/>
+                                    <DataGridTextColumn Header="Цель" Binding="{Binding Host}" Width="1.3*"/>
+                                    <DataGridTextColumn Header="IP" Binding="{Binding IpAddress}" Width="150"/>
+                                    <DataGridTextColumn Header="Результат" Binding="{Binding StatusText}" Width="150"/>
+                                    <DataGridTextColumn Header="Задержка" Binding="{Binding LatencyText}" Width="110"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Border>
+                    </TabItem>
+                </TabControl>
+            </Grid>
+        </TabItem>
+
+        <!-- ===== Настройки ===== -->
+        <TabItem Header="Настройки">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="32,28,32,32" MaxWidth="760">
+                    <TextBlock Text="Настройки" Style="{StaticResource PageTitle}"/>
+                    <TextBlock Text="Параметры применяются сразу и сохраняются автоматически."
+                               Style="{StaticResource Hint}"
+                               Margin="0,4,0,22"/>
+
+                    <!-- Мониторинг -->
+                    <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                        <StackPanel>
+                            <TextBlock Text="МОНИТОРИНГ" Style="{StaticResource SectionTitle}"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="150"/>
+                                    <ColumnDefinition Width="130"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Grid.Row="0" Text="Интервал между циклами, мс"
+                                           VerticalAlignment="Center" Margin="0,0,0,12"/>
+                                <TextBox x:Name="PingIntervalBox" Grid.Row="0" Grid.Column="1" Margin="12,0,0,12"/>
+                                <TextBlock Grid.Row="0" Grid.Column="2" Text="100–60000"
+                                           Style="{StaticResource Hint}"
+                                           VerticalAlignment="Center" Margin="12,0,0,12"/>
+
+                                <TextBlock Grid.Row="1" Text="Пакетов за один цикл"
+                                           VerticalAlignment="Center" Margin="0,0,0,12"/>
+                                <TextBox x:Name="PacketsPerCycleBox" Grid.Row="1" Grid.Column="1" Margin="12,0,0,12"/>
+                                <TextBlock Grid.Row="1" Grid.Column="2" Text="1–20"
+                                           Style="{StaticResource Hint}"
+                                           VerticalAlignment="Center" Margin="12,0,0,12"/>
+
+                                <TextBlock Grid.Row="2" Text="Период мини-графика и мини-матрицы, сек."
+                                           TextWrapping="Wrap"
+                                           VerticalAlignment="Center"/>
+                                <TextBox x:Name="MiniHistorySecondsBox" Grid.Row="2" Grid.Column="1" Margin="12,0,0,0"/>
+                                <TextBlock Grid.Row="2" Grid.Column="2" Text="5–3600"
+                                           Style="{StaticResource Hint}"
+                                           VerticalAlignment="Center" Margin="12,0,0,0"/>
+                            </Grid>
+
+                            <Button Content="Применить параметры ping"
+                                    Style="{StaticResource PrimaryButton}"
+                                    HorizontalAlignment="Left"
+                                    Margin="0,20,0,0"
+                                    Click="ApplyMonitoringSettings_Click"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Оформление -->
+                    <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                        <StackPanel>
+                            <TextBlock Text="ОФОРМЛЕНИЕ" Style="{StaticResource SectionTitle}"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="150"/>
+                                    <ColumnDefinition Width="130"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Тема оформления" VerticalAlignment="Center"/>
+                                <ComboBox x:Name="ThemeCombo" Grid.Column="1" Margin="12,0,0,0"
+                                          SelectionChanged="ThemeCombo_SelectionChanged">
+                                    <ComboBoxItem Content="Тёмная" Tag="Dark"/>
+                                    <ComboBoxItem Content="Светлая" Tag="Light"/>
+                                </ComboBox>
+                            </Grid>
+                            <TextBlock Text="Масштаб интерфейса: Ctrl + колесо мыши или Ctrl + «+» / «−»; Ctrl + 0 — вернуть 100%."
+                                       Style="{StaticResource Hint}"
+                                       TextWrapping="Wrap"
+                                       Margin="0,14,0,0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Система -->
+                    <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                        <StackPanel>
+                            <TextBlock Text="СИСТЕМА" Style="{StaticResource SectionTitle}"/>
+                            <CheckBox x:Name="StartWithWindowsCheckBox"
+                                      Content="Запускать приложение вместе с Windows обычным окном"
+                                      Margin="0,0,0,14"
+                                      Click="StartWithWindowsCheckBox_Click"/>
+                            <CheckBox x:Name="MinimizeToTrayCheckBox"
+                                      Content="Разрешить сворачивание в трей"
+                                      Click="MinimizeToTrayCheckBox_Click"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Данные -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Text="ДАННЫЕ" Style="{StaticResource SectionTitle}"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Content="Открыть папку данных"
+                                        Click="OpenDataFolder_Click"/>
+                                <Button Content="Открыть папку сессий"
+                                        Margin="10,0,0,0"
+                                        Click="OpenSessionsFolder_Click"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock x:Name="SettingsStatusText"
+                               Foreground="{DynamicResource MutedBrush}"
+                               Margin="2,16,0,0"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </ScrollViewer>
+        </TabItem>
+
+    </TabControl>
+</Window>

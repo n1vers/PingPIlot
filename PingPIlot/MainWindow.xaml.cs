@@ -1,0 +1,1182 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using Microsoft.Win32;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
+using Application = System.Windows.Application;
+using Clipboard = System.Windows.Clipboard;
+using Forms = System.Windows.Forms;
+using MessageBox = System.Windows.MessageBox;
+using MessageBoxResult = System.Windows.MessageBoxResult;
+using PingPilot.Models;
+using PingPilot.Services;
+
+namespace PingPilot;
+
+// Дашборд: сохранённые группы, плитки компьютеров, автоматический ping.
+public partial class MainWindow : Window
+{
+    private readonly SavedComputersService _store = new();
+    private readonly ObservableCollection<DashboardTile> _tiles = new();
+    private readonly Dictionary<Guid, DashboardTile> _tileCache = new();
+    private readonly SemaphoreSlim _pingSemaphore = new(256, 256);
+    private readonly DispatcherTimer _timer;
+    private readonly Dictionary<Guid, ComputerDetailsWindow> _detailWindows = new();
+    private readonly SessionStoreService _sessionStore = new();
+    private readonly ObservableCollection<MonitoringSession> _savedSessions = new();
+    private readonly ObservableCollection<SessionLogEntry> _liveSessionEntries = new();
+    private ICollectionView? _liveSessionView;
+    private readonly ObservableCollection<DashboardTile> _sessionTiles = new();
+    private readonly MonitoringSession _currentSession;
+    private DashboardTile? _observedSessionGraphTile;
+    private bool _showingCurrentSessionView = true;
+    private SavedComputersData _data = new();
+    private bool _loadingGroups;
+    private bool _refreshInProgress;
+    private bool _allowClose;
+    private bool _sessionWriteErrorShown;
+    private Forms.NotifyIcon? _trayIcon;
+    private const int MaxLiveSessionRows = 3000;
+
+    private ComputerGroup? CurrentGroup => GroupCombo.SelectedItem as ComputerGroup;
+
+    private const double MinUiScale = 0.7;
+    private const double MaxUiScale = 2.0;
+    private const double UiScaleStep = 0.1;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        FitWindowToScreen();
+
+        _currentSession = _sessionStore.StartSession();
+        SessionsGrid.ItemsSource = _savedSessions;
+        _liveSessionView = CollectionViewSource.GetDefaultView(_liveSessionEntries);
+        _liveSessionView.Filter = FilterLiveSessionEntry;
+        SessionRecordsGrid.ItemsSource = _liveSessionView;
+        SessionTileList.ItemsSource = _sessionTiles;
+        RefreshSavedSessionsList();
+        UpdateCurrentSessionHeader();
+
+        // Подключаем эти события после InitializeComponent, чтобы не реагировать
+        // на начальную инициализацию ComboBox из XAML.
+        ScanTargetModeCombo.SelectionChanged += TargetModeCombo_SelectionChanged;
+        MaxLatencyCombo.SelectionChanged += MaxLatencyCombo_SelectionChanged;
+
+        _autoScanTimer = new DispatcherTimer();
+        _autoScanTimer.Tick += AutoScanTimer_Tick;
+
+        TileList.ItemsSource = _tiles;
+        LoadData();
+        InitializeSort();
+        LoadGroups();
+        LoadNetworks();
+        InitializeScannerSettings();
+        InitializeUserSettings();
+        UpdateTrayIcon();
+        ShowCurrentSessionButton_Click(this, new RoutedEventArgs());
+
+        int intervalMs = Math.Clamp(_data.UserSettings?.PingIntervalMilliseconds ?? 1000, 100, 60000);
+        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(intervalMs) };
+        _timer.Tick += PingTimer_Tick;
+        _timer.Start();
+
+        Closing += MainWindow_Closing;
+        Closed += (_, _) =>
+        {
+            _timer.Stop();
+            _autoScanTimer.Stop();
+            _scanCts?.Cancel();
+            _trayIcon?.Dispose();
+            _sessionStore.Dispose();
+        };
+    }
+
+    private void InitializeUserSettings()
+    {
+        UserSettings settings = _data.UserSettings ?? new UserSettings();
+        _data.UserSettings = settings;
+        PingIntervalBox.Text = Math.Clamp(settings.PingIntervalMilliseconds, 100, 60000).ToString();
+        PacketsPerCycleBox.Text = Math.Clamp(settings.PacketsPerCycle, 1, 20).ToString();
+        MiniHistorySecondsBox.Text = Math.Clamp(settings.MiniHistorySeconds, 5, 3600).ToString();
+        ThemeCombo.SelectedIndex = string.Equals(settings.Theme, "Light", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        StartWithWindowsCheckBox.IsChecked = settings.StartWithWindows;
+        MinimizeToTrayCheckBox.IsChecked = settings.MinimizeToTray;
+        SetUiScale(settings.UiScale, save: false);
+        ApplyTheme(settings.Theme);
+    }
+
+    // ---------- Масштаб и размер окна ----------
+
+    /// <summary>
+    /// Подбирает стартовый размер окна по рабочей области экрана: на маленьких мониторах окно
+    /// не вылезает за экран, на больших — не остаётся крошечным.
+    /// </summary>
+    private void FitWindowToScreen()
+    {
+        Rect work = SystemParameters.WorkArea;
+        double width = Math.Min(work.Width * 0.95, Math.Max(1280, work.Width * 0.7));
+        double height = Math.Min(work.Height * 0.95, Math.Max(800, work.Height * 0.75));
+        Width = Math.Max(MinWidth, width);
+        Height = Math.Max(MinHeight, height);
+    }
+
+    private void SetUiScale(double scale, bool save = true)
+    {
+        if (double.IsNaN(scale) || double.IsInfinity(scale) || scale <= 0)
+            scale = 1.0;
+
+        scale = Math.Round(Math.Clamp(scale, MinUiScale, MaxUiScale), 2);
+        UiScale.ScaleX = scale;
+        UiScale.ScaleY = scale;
+
+        if (!save || _data?.UserSettings == null || Math.Abs(_data.UserSettings.UiScale - scale) < 0.001)
+            return;
+
+        _data.UserSettings.UiScale = scale;
+        SaveData();
+    }
+
+    private void Window_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if ((Keyboard.Modifiers & ModifierKeys.Control) == 0)
+            return;
+
+        SetUiScale(UiScale.ScaleX + (e.Delta > 0 ? UiScaleStep : -UiScaleStep));
+        e.Handled = true;
+    }
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if ((Keyboard.Modifiers & ModifierKeys.Control) == 0)
+            return;
+
+        switch (e.Key)
+        {
+            case Key.OemPlus:
+            case Key.Add:
+                SetUiScale(UiScale.ScaleX + UiScaleStep);
+                break;
+            case Key.OemMinus:
+            case Key.Subtract:
+                SetUiScale(UiScale.ScaleX - UiScaleStep);
+                break;
+            case Key.D0:
+            case Key.NumPad0:
+                SetUiScale(1.0);
+                break;
+            default:
+                return;
+        }
+
+        e.Handled = true;
+    }
+
+    private void ApplyMonitoringSettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (!int.TryParse(PingIntervalBox.Text, out int interval) || interval is < 100 or > 60000 ||
+            !int.TryParse(PacketsPerCycleBox.Text, out int packets) || packets is < 1 or > 20 ||
+            !int.TryParse(MiniHistorySecondsBox.Text, out int miniHistorySeconds) || miniHistorySeconds is < 5 or > 3600)
+        {
+            SettingsStatusText.Text = "Укажите интервал 100–60000 мс, пакеты 1–20 и период mini-истории 5–3600 секунд.";
+            return;
+        }
+
+        _data.UserSettings.PingIntervalMilliseconds = interval;
+        _data.UserSettings.PacketsPerCycle = packets;
+        _data.UserSettings.MiniHistorySeconds = miniHistorySeconds;
+        foreach (DashboardTile tile in _tileCache.Values)
+            tile.SetMiniHistorySeconds(miniHistorySeconds);
+        _timer.Interval = TimeSpan.FromMilliseconds(interval);
+        SaveData();
+        SettingsStatusText.Text = $"Параметры применены: ping каждые {interval} мс, пакетов: {packets}, mini-история: {miniHistorySeconds} с.";
+        _ = RefreshTilesAsync();
+    }
+
+    private void ThemeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsInitialized || ThemeCombo.SelectedItem is not ComboBoxItem item)
+            return;
+        _data.UserSettings.Theme = item.Tag?.ToString() ?? "Dark";
+        ApplyTheme(_data.UserSettings.Theme);
+        SaveData();
+    }
+
+    private static void ApplyTheme(string theme)
+    {
+        bool light = string.Equals(theme, "Light", StringComparison.OrdinalIgnoreCase);
+
+        // Все ключи подключены в XAML через DynamicResource, поэтому смена темы
+        // сразу обновляет и главное окно, и окна подробностей, и диалоги.
+        SetBrush("BgBrush", light ? "F1F5F9" : "0F172A");
+        SetBrush("SurfaceBrush", light ? "FFFFFF" : "1E293B");
+        SetBrush("Surface2Brush", light ? "E2E8F0" : "2A3850");
+        SetBrush("LineBrush", light ? "CBD5E1" : "334155");
+        SetBrush("TextBrush", light ? "0F172A" : "F1F5F9");
+        SetBrush("MutedBrush", light ? "475569" : "94A3B8");
+        SetBrush("AccentBrush", light ? "2563EB" : "3B82F6");
+        SetBrush("AccentHoverBrush", light ? "1D4ED8" : "2563EB");
+        SetBrush("ThumbBrush", light ? "94A3B8" : "475569");
+        SetBrush("DangerBrush", light ? "DC2626" : "F87171");
+        SetBrush("GraphLineBrush", light ? "1D4ED8" : "93C5FD");
+    }
+
+    private static void SetBrush(string key, string hexColor)
+    {
+        var color = (System.Windows.Media.Color)
+            System.Windows.Media.ColorConverter.ConvertFromString("#" + hexColor);
+
+        // Ресурсы SolidColorBrush могут быть заморожены WPF и потому неизменяемы.
+        // Заменяем ресурс целиком, а не изменяем существующий экземпляр.
+        Application.Current.Resources[key] = new SolidColorBrush(color);
+    }
+
+    private void StartWithWindowsCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        bool enabled = StartWithWindowsCheckBox.IsChecked == true;
+        try
+        {
+            using RegistryKey? key = Registry.CurrentUser.CreateSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+            if (enabled)
+                key?.SetValue("PingPilot", $"\"{Environment.ProcessPath}\"");
+            else
+                key?.DeleteValue("PingPilot", false);
+            _data.UserSettings.StartWithWindows = enabled;
+            SaveData();
+            SettingsStatusText.Text = enabled ? "Автозапуск включён." : "Автозапуск выключен.";
+        }
+        catch (Exception ex)
+        {
+            SettingsStatusText.Text = $"Не удалось изменить автозапуск: {ex.Message}";
+        }
+    }
+
+    private void MinimizeToTrayCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        _data.UserSettings.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;
+        SaveData();
+        UpdateTrayIcon();
+        SettingsStatusText.Text = "Настройка трея сохранена.";
+    }
+
+    private void UpdateTrayIcon()
+    {
+        if (_data.UserSettings.MinimizeToTray)
+        {
+            if (_trayIcon != null)
+                return;
+
+            var menu = new Forms.ContextMenuStrip();
+            menu.Items.Add("Открыть PingPilot", null, (_, _) => RestoreFromTray());
+            menu.Items.Add(new Forms.ToolStripSeparator());
+            menu.Items.Add("Выход", null, (_, _) => Close());
+
+            _trayIcon = new Forms.NotifyIcon
+            {
+                Icon = System.Drawing.SystemIcons.Application,
+                Text = "PingPilot",
+                ContextMenuStrip = menu,
+                Visible = true
+            };
+            _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+            return;
+        }
+
+        if (_trayIcon is not null)
+        {
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
+            _trayIcon = null;
+        }
+    }
+
+    private void RestoreFromTray()
+    {
+        Visibility = Visibility.Visible;
+        WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void MainWindow_StateChanged(object? sender, EventArgs e)
+    {
+        if (_data.UserSettings.MinimizeToTray && WindowState == WindowState.Minimized)
+            Visibility = Visibility.Hidden;
+    }
+
+    private static string DataFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PingPilot");
+    private static string SessionsFolder => Path.Combine(DataFolder, "Sessions");
+
+    private static void OpenFolder(string path)
+    {
+        Directory.CreateDirectory(path);
+        Process.Start(new ProcessStartInfo("explorer.exe", path) { UseShellExecute = true });
+    }
+
+    private void OpenDataFolder_Click(object sender, RoutedEventArgs e) => OpenFolder(DataFolder);
+    private void OpenSessionsFolder_Click(object sender, RoutedEventArgs e) => OpenFolder(SessionsFolder);
+
+    // ---------- Данные ----------
+
+    private void LoadData()
+    {
+        try
+        {
+            _data = _store.Load();
+        }
+        catch (Exception ex)
+        {
+            _data = new SavedComputersData();
+            ShowError("Не удалось загрузить сохранённые компьютеры. Если файл повреждён, его резервная копия лежит рядом.", ex);
+        }
+    }
+
+    private void SaveData()
+    {
+        try
+        {
+            _store.Save(_data);
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось сохранить данные. Проверьте, что есть доступ на запись в профиль пользователя.", ex);
+        }
+    }
+
+    private static void ShowError(string message, Exception ex) =>
+        MessageBox.Show($"{message}\n\nПодробности: {ex.Message}", "PingPilot — Ошибка",
+            MessageBoxButton.OK, MessageBoxImage.Error);
+
+    private static void ShowWarning(string message) =>
+        MessageBox.Show(message, "PingPilot — Внимание",
+            MessageBoxButton.OK, MessageBoxImage.Warning);
+
+    private static bool Confirm(string question) =>
+        MessageBox.Show(question, "PingPilot",
+            MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+
+    // ---------- Группы и плитки ----------
+
+    private void LoadGroups(Guid? select = null)
+    {
+        Guid? id = select ?? CurrentGroup?.Id;
+
+        _loadingGroups = true;
+        GroupCombo.ItemsSource = null;
+        GroupCombo.ItemsSource = _data.Groups;
+        GroupCombo.SelectedItem =
+            _data.Groups.FirstOrDefault(g => g.Id == id) ?? _data.Groups.FirstOrDefault();
+        _loadingGroups = false;
+
+        RebuildTiles();
+    }
+
+    private DashboardTile GetOrCreateTile(SavedComputer computer)
+    {
+        if (_tileCache.TryGetValue(computer.Id, out DashboardTile? tile) &&
+            ReferenceEquals(tile.Computer, computer))
+            return tile;
+
+        tile = new DashboardTile(computer);
+        tile.SetVisualizationMode(_data.UserSettings?.TileVisualization ?? "Graph");
+        tile.SetMiniHistorySeconds(_data.UserSettings?.MiniHistorySeconds ?? 60);
+        _tileCache[computer.Id] = tile;
+        return tile;
+    }
+
+    private void RebuildTiles()
+    {
+        _tiles.Clear();
+
+        var savedIds = _data.Computers.Select(c => c.Id).ToHashSet();
+        foreach (Guid staleId in _tileCache.Keys.Where(id => !savedIds.Contains(id)).ToArray())
+            _tileCache.Remove(staleId);
+
+        if (CurrentGroup is { } group)
+        {
+            foreach (SavedComputer computer in _data.Computers.Where(c => c.GroupId == group.Id))
+                _tiles.Add(GetOrCreateTile(computer));
+        }
+
+        ApplySort();
+
+        EmptyText.Text =
+            _data.Groups.Count == 0 ? "Групп пока нет. Нажмите «+ Группа», чтобы создать первую группу, затем добавьте компьютеры."
+            : _tiles.Count == 0 ? "В этой группе пока нет компьютеров. Добавьте их вручную или через сканер сети."
+            : "";
+
+        UpdateSummary();
+        _ = RefreshTilesAsync();
+    }
+
+    private void UpdateSummary()
+    {
+        if (_data.Computers.Count == 0)
+        {
+            SummaryText.Text = "Компьютеров: 0";
+            return;
+        }
+
+        int onlineInGroup = _tiles.Count(t => t.IsOnline == true);
+        int checkedInGroup = _tiles.Count(t => t.IsOnline.HasValue);
+        int onlineTotal = _tileCache.Values.Count(t => t.IsOnline == true);
+
+        SummaryText.Text = CurrentGroup == null
+            ? $"Онлайн: {onlineTotal} из {_data.Computers.Count}"
+            : $"Группа: онлайн {onlineInGroup}/{_tiles.Count} · Проверено: {checkedInGroup}/{_tiles.Count} · Всего онлайн: {onlineTotal}";
+    }
+
+    // Проверяем все сохранённые компьютеры, а на дашборде показываем выбранную группу.
+    private async Task RefreshTilesAsync()
+    {
+        if (_refreshInProgress)
+            return;
+
+        _refreshInProgress = true;
+        try
+        {
+            DashboardTile[] allTiles = _data.Computers
+                .Select(GetOrCreateTile)
+                .ToArray();
+
+            await Task.WhenAll(allTiles.Select(PingTileAsync));
+            ApplySort();
+            UpdateSummary();
+        }
+        catch (Exception ex)
+        {
+            // RefreshTilesAsync запускается из DispatcherTimer и из нескольких
+            // fire-and-forget мест. Ошибка одного цикла не должна превращаться
+            // в необработанное исключение async void и прекращать мониторинг.
+            Debug.WriteLine($"Ping refresh failed: {ex}");
+        }
+        finally
+        {
+            _refreshInProgress = false;
+        }
+    }
+
+    private async void PingTimer_Tick(object? sender, EventArgs e)
+    {
+        try
+        {
+            await RefreshTilesAsync();
+        }
+        catch (Exception ex)
+        {
+            // Последняя страховка для async void-обработчика WPF.
+            Debug.WriteLine($"Ping timer tick failed: {ex}");
+        }
+    }
+
+    private async Task PingTileAsync(DashboardTile tile)
+    {
+        await _pingSemaphore.WaitAsync();
+        try
+        {
+            if (tile.Busy)
+                return;
+
+            tile.Busy = true;
+            try
+            {
+                int packets = Math.Clamp(_data.UserSettings?.PacketsPerCycle ?? 1, 1, 20);
+                for (int i = 0; i < packets; i++)
+                {
+                    PingResult result = await PingService.PingAsync(tile.PingTarget, timeoutMs: 800);
+                    tile.Apply(result);
+                    RecordPingResult(tile, result);
+                }
+            }
+            finally
+            {
+                tile.Busy = false;
+            }
+        }
+        finally
+        {
+            _pingSemaphore.Release();
+        }
+    }
+
+    // ---------- Добавление и управление ----------
+
+    private bool EnsureGroup()
+    {
+        if (_data.Groups.Count > 0)
+            return true;
+
+        return AddGroup() != null;
+    }
+
+    private ComputerGroup? AddGroup()
+    {
+        string? name = Dialogs.AskGroupName(this);
+        if (name == null)
+            return null;
+
+        if (_data.Groups.Any(g => string.Equals(g.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            ShowWarning("Группа с таким названием уже существует.");
+            return null;
+        }
+
+        var group = new ComputerGroup { Name = name };
+        _data.Groups.Add(group);
+        SaveData();
+        LoadGroups(group.Id);
+        return group;
+    }
+
+    private int AddComputers(IEnumerable<SavedComputer> items)
+    {
+        int added = 0;
+
+        foreach (SavedComputer pc in items)
+        {
+            bool exists = _data.Computers.Any(c =>
+                c.GroupId == pc.GroupId &&
+                string.Equals(c.Host, pc.Host, StringComparison.OrdinalIgnoreCase));
+
+            if (exists)
+                continue;
+
+            _data.Computers.Add(pc);
+            added++;
+        }
+
+        if (added > 0)
+            SaveData();
+
+        return added;
+    }
+
+    private void GroupCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingGroups)
+            return;
+
+        RebuildTiles();
+        if (_showingCurrentSessionView)
+            RefreshCurrentSessionView();
+    }
+
+    private void AddGroupButton_Click(object sender, RoutedEventArgs e) => AddGroup();
+
+    private void RenameGroupButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (CurrentGroup is not { } group)
+        {
+            ShowWarning("Сначала выберите группу.");
+            return;
+        }
+
+        string? name = Dialogs.AskGroupName(this, group.Name);
+        if (name == null || name == group.Name)
+            return;
+
+        if (_data.Groups.Any(g => g.Id != group.Id &&
+            string.Equals(g.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            ShowWarning("Группа с таким названием уже существует.");
+            return;
+        }
+
+        group.Name = name;
+        SaveData();
+        LoadGroups(group.Id);
+    }
+
+    private void DeleteGroupButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (CurrentGroup is not { } group)
+            return;
+
+        int count = _data.Computers.Count(c => c.GroupId == group.Id);
+        string question = count == 0
+            ? $"Удалить группу «{group.Name}»?"
+            : $"Удалить группу «{group.Name}» вместе с компьютерами ({count})?";
+
+        if (!Confirm(question))
+            return;
+
+        _data.Computers.RemoveAll(c => c.GroupId == group.Id);
+        _data.Groups.Remove(group);
+        SaveData();
+        LoadGroups();
+    }
+
+    private void AddComputerButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureGroup())
+            return;
+
+        // Окно остаётся открытым, пока пользователь добавляет компьютеры подряд.
+        Dialogs.AddComputersContinuously(this, _data.Groups, CurrentGroup?.Id, TryAddComputer);
+    }
+
+    // Возвращает null при успехе или текст ошибки для окна добавления.
+    private string? TryAddComputer(SavedComputer computer)
+    {
+        if (AddComputers(new[] { computer }) == 0)
+            return $"'{computer.Host}' is already in this group.";
+
+        LoadGroups(computer.GroupId);
+        return null;
+    }
+
+    private async void TilePingNow_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: DashboardTile tile })
+            return;
+
+        await PingTileAsync(tile);
+        ApplySort();
+        UpdateSummary();
+    }
+
+    private void TileCopyHost_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: DashboardTile tile })
+            return;
+
+        try
+        {
+            Clipboard.SetText(tile.Host);
+            SummaryText.Text = $"Адрес {tile.Host} скопирован";
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось скопировать адрес в буфер обмена.", ex);
+        }
+    }
+
+    // ---------- Подробности компьютера ----------
+
+    private void Tile_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: DashboardTile tile })
+            OpenDetails(tile);
+    }
+
+    private void TileEdit_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: DashboardTile tile })
+            OpenDetails(tile);
+    }
+
+    private void OpenDetails(DashboardTile tile)
+    {
+        Guid id = tile.Computer.Id;
+
+        // Одно окно на компьютер: повторный клик просто показывает уже открытое.
+        if (_detailWindows.TryGetValue(id, out ComputerDetailsWindow? existing))
+        {
+            if (existing.WindowState == WindowState.Minimized)
+                existing.WindowState = WindowState.Normal;
+
+            existing.Activate();
+            return;
+        }
+
+        var window = new ComputerDetailsWindow(
+            this,
+            tile,
+            _data.Groups,
+            ApplyComputerChanges,
+            DeleteComputer,
+            async t =>
+            {
+                await PingTileAsync(t);
+                ApplySort();
+                UpdateSummary();
+            });
+
+        _detailWindows[id] = window;
+        window.Closed += (_, _) => _detailWindows.Remove(id);
+        window.Show();
+    }
+
+    // Меняем компьютер на месте, чтобы плитка и накопленная история пинга сохранились.
+    // Возвращает null при успехе или текст ошибки.
+    private string? ApplyComputerChanges(DashboardTile tile, string host, string description, Guid groupId)
+    {
+        host = host.Trim();
+
+        if (host.Length == 0)
+            return "Введите IP-адрес или DNS-имя.";
+
+        if (_data.Groups.All(g => g.Id != groupId))
+            return "Выберите группу.";
+
+        SavedComputer computer = tile.Computer;
+
+        bool duplicate = _data.Computers.Any(c =>
+            c.Id != computer.Id &&
+            c.GroupId == groupId &&
+            string.Equals(c.Host, host, StringComparison.OrdinalIgnoreCase));
+
+        if (duplicate)
+            return "В этой группе уже есть компьютер с таким адресом.";
+
+        bool hostChanged = !string.Equals(computer.Host, host, StringComparison.OrdinalIgnoreCase);
+
+        // Имя, заданное раньше вручную или сканером, сохраняем; иначе имя следует за адресом.
+        bool hasCustomName =
+            !string.IsNullOrWhiteSpace(computer.Name) &&
+            !string.Equals(computer.Name, computer.Host, StringComparison.Ordinal);
+
+        if (!hasCustomName)
+            computer.Name = host;
+
+        computer.Host = host;
+        computer.Description = description.Trim();
+        computer.GroupId = groupId;
+
+        SaveData();
+
+        // Статистика относилась к старому адресу — начинаем заново.
+        if (hostChanged)
+            tile.ResetHistory();
+        else
+            tile.Refresh();
+
+        LoadGroups(CurrentGroup?.Id);
+        return null;
+    }
+
+    // Спрашивает подтверждение и удаляет компьютер; true — удалён.
+    private bool DeleteComputer(DashboardTile tile)
+    {
+        if (!Confirm($"Удалить компьютер «{tile.Name}»?"))
+            return false;
+
+        _data.Computers.Remove(tile.Computer);
+        _tileCache.Remove(tile.Computer.Id);
+        SaveData();
+        LoadGroups();
+        return true;
+    }
+
+    private void TileDelete_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: DashboardTile tile })
+            return;
+
+        Guid id = tile.Computer.Id;
+
+        if (DeleteComputer(tile) && _detailWindows.TryGetValue(id, out ComputerDetailsWindow? window))
+            window.Close();
+    }
+
+    private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+    {
+        await RefreshTilesAsync();
+    }
+
+    // ---------- Сессии мониторинга ----------
+
+    private void RecordPingResult(DashboardTile tile, PingResult result)
+    {
+        string ipAddress = result.ResolvedIp;
+        if (string.IsNullOrWhiteSpace(ipAddress) &&
+            !string.Equals(tile.IpAddressText, "не определён", StringComparison.OrdinalIgnoreCase))
+        {
+            ipAddress = tile.IpAddressText;
+        }
+
+        var entry = new SessionLogEntry
+        {
+            Timestamp = DateTime.Now,
+            ComputerId = tile.Computer.Id,
+            GroupId = tile.Computer.GroupId,
+            GroupName = _data.Groups.FirstOrDefault(g => g.Id == tile.Computer.GroupId)?.Name ?? "",
+            ComputerName = tile.Name,
+            Host = tile.Host,
+            IpAddress = ipAddress,
+            Status = result.Status,
+            LatencyMs = result.Ok ? result.LatencyMs : null,
+            Success = result.Ok
+        };
+
+        try
+        {
+            // Журнал записывается построчно на диск, поэтому длинная сессия
+            // не обязана целиком храниться в оперативной памяти.
+            _sessionStore.Append(_currentSession, entry);
+        }
+        catch (Exception ex)
+        {
+            if (!_sessionWriteErrorShown)
+            {
+                _sessionWriteErrorShown = true;
+                Dispatcher.BeginInvoke(new Action(() => ShowError(
+                    "Не удалось записать журнал текущей сессии. Новые записи могут не сохраниться.", ex)));
+            }
+        }
+
+        if (Dispatcher.CheckAccess())
+            AddLiveSessionEntry(entry);
+        else
+            Dispatcher.BeginInvoke(new Action(() => AddLiveSessionEntry(entry)));
+    }
+
+    private void AddLiveSessionEntry(SessionLogEntry entry)
+    {
+        _liveSessionEntries.Insert(0, entry);
+        while (_liveSessionEntries.Count > MaxLiveSessionRows)
+            _liveSessionEntries.RemoveAt(_liveSessionEntries.Count - 1);
+
+        if (_showingCurrentSessionView)
+            UpdateCurrentSessionHeader();
+    }
+
+    private bool FilterLiveSessionEntry(object item) =>
+        item is SessionLogEntry entry && CurrentGroup is { } group && entry.GroupId == group.Id;
+
+    private void UpdateCurrentSessionHeader()
+    {
+        string groupName = CurrentGroup?.Name ?? "не выбрана";
+        int visibleEntries = CurrentGroup == null
+            ? 0
+            : _liveSessionEntries.Count(entry => entry.GroupId == CurrentGroup.Id);
+        SessionLogEntry[] entries = CurrentGroup == null
+            ? Array.Empty<SessionLogEntry>()
+            : _liveSessionEntries.Where(entry => entry.GroupId == CurrentGroup.Id).ToArray();
+        string stats = FormatSessionStats(entries);
+
+        SessionViewHeaderText.Text =
+            $"Текущая сессия · группа «{groupName}» · начата {_currentSession.StartedAt:dd.MM.yyyy HH:mm:ss} · " +
+            $"событий группы в текущем журнале: {visibleEntries} · всего записей в активной сессии: {_currentSession.EntryCount} · {stats}. " +
+            "При сохранении останется только выбранная группа.";
+    }
+
+    private static string FormatSessionStats(IEnumerable<SessionLogEntry> source)
+    {
+        SessionLogEntry[] entries = source.ToArray();
+        int successful = entries.Count(entry => entry.Success);
+        long[] latencies = entries.Where(entry => entry.LatencyMs.HasValue).Select(entry => entry.LatencyMs!.Value).ToArray();
+        if (entries.Length == 0)
+            return "успешных: 0, потери: —, задержка: —";
+
+        double loss = (entries.Length - successful) * 100.0 / entries.Length;
+        string latency = latencies.Length == 0
+            ? "—"
+            : $"{latencies.Min()} / {latencies.Average():F0} / {latencies.Max()} мс (мин/сред/макс)";
+        return $"успешных: {successful}/{entries.Length}, потери: {loss:F1}%, задержка: {latency}";
+    }
+
+    private void RefreshCurrentSessionView()
+    {
+        if (!_showingCurrentSessionView)
+            return;
+
+        SessionTileList.ItemsSource = _tiles;
+        SessionRecordsGrid.ItemsSource = _liveSessionView;
+        _liveSessionView?.Refresh();
+
+        if (_observedSessionGraphTile == null || !_tiles.Contains(_observedSessionGraphTile))
+            SetSessionGraphTile(_tiles.FirstOrDefault());
+        else
+            UpdateSelectedSessionComputerHeader(_observedSessionGraphTile);
+
+        UpdateCurrentSessionHeader();
+    }
+
+    private void SetSessionGraphTile(DashboardTile? tile)
+    {
+        if (_observedSessionGraphTile != null)
+            _observedSessionGraphTile.PropertyChanged -= SessionGraphTile_PropertyChanged;
+
+        _observedSessionGraphTile = tile;
+        SessionGraph.Tile = tile;
+
+        if (tile != null)
+            tile.PropertyChanged += SessionGraphTile_PropertyChanged;
+
+        UpdateSelectedSessionComputerHeader(tile);
+        SessionGraph.InvalidateVisual();
+    }
+
+    private void SessionGraphTile_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        SessionGraph.InvalidateVisual();
+        UpdateSelectedSessionComputerHeader(_observedSessionGraphTile);
+    }
+
+    private void UpdateSelectedSessionComputerHeader(DashboardTile? tile)
+    {
+        if (tile == null)
+        {
+            SessionSelectedComputerText.Text = "Выберите компьютер в матрице, чтобы посмотреть его график";
+            return;
+        }
+
+        SessionSelectedComputerText.Text =
+            $"{tile.Name} · {tile.IpAddressText} · {tile.StatusText} · {tile.LatencyText} · {tile.PacketLossText} · " +
+            $"Проверок: {tile.SentReceivedText} · История: {tile.GetHistory().Length}";
+    }
+
+    private void BuildSessionMatrix(MonitoringSession session, IReadOnlyList<SessionLogEntry> entries)
+    {
+        _sessionTiles.Clear();
+        var snapshots = session.Computers?.ToList() ?? new List<SessionComputerSnapshot>();
+
+        // Fill any missing snapshots from the records. This also preserves a computer
+        // that was removed from the live group after producing historical samples.
+        var knownComputerIds = snapshots.Select(snapshot => snapshot.Id).ToHashSet();
+        foreach (IGrouping<Guid, SessionLogEntry> pcEntries in entries.GroupBy(entry => entry.ComputerId))
+        {
+            if (!knownComputerIds.Add(pcEntries.Key))
+                continue;
+
+            SessionLogEntry newest = pcEntries.OrderByDescending(entry => entry.Timestamp).First();
+            snapshots.Add(new SessionComputerSnapshot
+            {
+                Id = pcEntries.Key,
+                Name = string.IsNullOrWhiteSpace(newest.ComputerName) ? newest.Host : newest.ComputerName,
+                Host = newest.Host,
+                Description = "",
+                IpAddress = pcEntries.OrderByDescending(entry => entry.Timestamp)
+                    .Select(entry => entry.IpAddress)
+                    .FirstOrDefault(ip => !string.IsNullOrWhiteSpace(ip)) ?? ""
+            });
+        }
+
+        foreach (SessionComputerSnapshot snapshot in snapshots)
+        {
+            var computer = new SavedComputer
+            {
+                Id = snapshot.Id,
+                Name = string.IsNullOrWhiteSpace(snapshot.Name) ? snapshot.Host : snapshot.Name,
+                Host = snapshot.Host,
+                Description = snapshot.Description,
+                GroupId = session.GroupId
+            };
+
+            var tile = new DashboardTile(computer);
+            List<SessionLogEntry> pcEntries = entries
+                .Where(entry => entry.ComputerId == snapshot.Id)
+                .OrderBy(entry => entry.Timestamp)
+                .ToList();
+
+            string latestIp = pcEntries
+                .OrderByDescending(entry => entry.Timestamp)
+                .Select(entry => entry.IpAddress)
+                .FirstOrDefault(ip => !string.IsNullOrWhiteSpace(ip))
+                ?? snapshot.IpAddress;
+
+            PingSample[] samples = pcEntries
+                .Select(entry => new PingSample(
+                    entry.Timestamp,
+                    entry.Success ? entry.LatencyMs : null,
+                    entry.Status))
+                .ToArray();
+
+            tile.LoadHistoricalHistory(samples, latestIp);
+            _sessionTiles.Add(tile);
+        }
+
+        SessionTileList.ItemsSource = _sessionTiles;
+        SetSessionGraphTile(_sessionTiles.FirstOrDefault());
+    }
+
+    private void SessionTile_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: DashboardTile tile })
+            SetSessionGraphTile(tile);
+    }
+
+    private void RefreshSavedSessionsList()
+    {
+        Guid? selectedId = (SessionsGrid.SelectedItem as MonitoringSession)?.Id;
+        IReadOnlyList<MonitoringSession> sessions = _sessionStore.LoadSavedSessions();
+
+        _savedSessions.Clear();
+        foreach (MonitoringSession session in sessions.OrderByDescending(s => s.StartedAt))
+            _savedSessions.Add(session);
+
+        if (selectedId.HasValue)
+            SessionsGrid.SelectedItem = _savedSessions.FirstOrDefault(s => s.Id == selectedId.Value);
+    }
+
+    private async void SessionsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SessionsGrid.SelectedItem is not MonitoringSession session)
+            return;
+
+        _showingCurrentSessionView = false;
+        SessionViewHeaderText.Text = $"Загрузка сессии от {session.StartedAt:dd.MM.yyyy HH:mm:ss}…";
+        try
+        {
+            IReadOnlyList<SessionLogEntry> entries =
+                await Task.Run(() => _sessionStore.LoadEntries(session.Id));
+
+            // Пользователь мог выбрать другую сессию, пока выполнялась загрузка.
+            if (SessionsGrid.SelectedItem is not MonitoringSession selected || selected.Id != session.Id)
+                return;
+
+            SessionRecordsGrid.ItemsSource = entries;
+            BuildSessionMatrix(session, entries);
+            string groupName = string.IsNullOrWhiteSpace(session.GroupName)
+                ? entries.FirstOrDefault()?.GroupName ?? "не указана"
+                : session.GroupName;
+            SessionViewHeaderText.Text =
+                $"Сессия от {session.StartedAt:dd.MM.yyyy HH:mm:ss} · группа: {groupName} · " +
+                $"записей: {entries.Count} · компьютеров: {session.ComputerCount} · длительность: {session.DurationText} · " +
+                FormatSessionStats(entries);
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось открыть сессию.", ex);
+        }
+    }
+
+    private void ShowCurrentSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        _showingCurrentSessionView = true;
+        SessionsGrid.SelectedItem = null;
+        RefreshCurrentSessionView();
+    }
+
+    private void RefreshSessionsButton_Click(object sender, RoutedEventArgs e)
+    {
+        RefreshSavedSessionsList();
+    }
+
+    private void DeleteSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (SessionsGrid.SelectedItem is not MonitoringSession session)
+        {
+            ShowWarning("Сначала выберите сохранённую сессию.");
+            return;
+        }
+
+        if (!Confirm($"Удалить сессию от {session.StartedAt:dd.MM.yyyy HH:mm:ss} с {session.EntryCount} записями?"))
+            return;
+
+        try
+        {
+            _sessionStore.DeleteSession(session.Id);
+            RefreshSavedSessionsList();
+            ShowCurrentSessionButton_Click(sender, e);
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось удалить сессию.", ex);
+        }
+    }
+
+    private void MainWindow_Closing(object? sender, CancelEventArgs e)
+    {
+        if (_allowClose)
+            return;
+
+        if (_currentSession.EntryCount == 0)
+        {
+            try
+            {
+                _sessionStore.DiscardSession(_currentSession);
+                _allowClose = true;
+            }
+            catch (Exception ex)
+            {
+                ShowError("Не удалось закрыть временный журнал сессии.", ex);
+                e.Cancel = true;
+            }
+            return;
+        }
+
+        ComputerGroup? group = CurrentGroup;
+        if (group == null)
+        {
+            MessageBoxResult noGroupChoice = MessageBox.Show(
+                this,
+                "Сейчас на дашборде не выбрана группа, поэтому сессию нельзя сохранить только для одного профиля. Закрыть без сохранения?",
+                "PingPilot — нет выбранной группы",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Information);
+
+            if (noGroupChoice != MessageBoxResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            try
+            {
+                _sessionStore.DiscardSession(_currentSession);
+                _allowClose = true;
+            }
+            catch (Exception ex)
+            {
+                ShowError("Не удалось удалить временную сессию.", ex);
+                e.Cancel = true;
+            }
+            return;
+        }
+
+        try
+        {
+            (long EntryCount, int ComputerCount) summary = _sessionStore.GetActiveSummary(group.Id);
+            List<SessionComputerSnapshot> computers = _data.Computers
+                .Where(computer => computer.GroupId == group.Id)
+                .Select(computer =>
+                {
+                    DashboardTile tile = GetOrCreateTile(computer);
+                    return new SessionComputerSnapshot
+                    {
+                        Id = computer.Id,
+                        Name = computer.Name,
+                        Host = computer.Host,
+                        Description = computer.Description,
+                        IpAddress = string.Equals(tile.IpAddressText, "не определён", StringComparison.OrdinalIgnoreCase)
+                            ? ""
+                            : tile.IpAddressText
+                    };
+                })
+                .ToList();
+
+            MessageBoxResult choice = MessageBox.Show(
+                this,
+                $"Сохранить сессию мониторинга только для выбранной группы «{group.Name}»?\n\n" +
+                $"Начало: {_currentSession.StartedAt:dd.MM.yyyy HH:mm:ss}\n" +
+                $"Группа: {group.Name}\n" +
+                $"Событий в этой группе: {summary.EntryCount}\n" +
+                $"Компьютеров в матрице: {computers.Count}\n\n" +
+                "Графики и историю каждого компьютера этой группы можно будет открыть позже.\n\n" +
+                "Да — сохранить выбранную группу.\nНет — закрыть без сохранения.\nОтмена — вернуться в программу.",
+                "PingPilot — сохранение сессии",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Question);
+
+            if (choice == MessageBoxResult.Cancel)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            if (choice == MessageBoxResult.Yes)
+            {
+                _sessionStore.SaveSession(_currentSession, group.Id, group.Name, computers);
+            }
+            else
+            {
+                _sessionStore.DiscardSession(_currentSession);
+            }
+
+            _allowClose = true;
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось завершить сессию. Программа останется открытой, чтобы журнал не потерялся.", ex);
+            e.Cancel = true;
+        }
+    }
+
+}
