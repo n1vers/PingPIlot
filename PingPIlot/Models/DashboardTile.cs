@@ -32,19 +32,20 @@ public class DashboardTile : INotifyPropertyChanged
     public string Host => Computer.Host;
     public string Description => Computer.Description;
 
-    public string PingTarget => TryGetUsableAddress(_resolvedIp, out IPAddress resolvedAddress)
-        ? resolvedAddress.ToString()
-        : Host;
+    // Всегда проверяем адрес так, как он введён. IP для DNS-имён выбирает PingService
+    // и сам обновляет его, а тут IP только показывается — раньше первый найденный IP
+    // «прилипал» к плитке навсегда, даже если был неверным или устарел.
+    public string PingTarget => Host;
 
     public string IpAddressText
     {
         get
         {
-            if (TryGetUsableAddress(_resolvedIp, out IPAddress resolvedAddress))
-                return resolvedAddress.ToString();
+            if (TryGetUsableAddress(Host, out IPAddress hostAddress))
+                return hostAddress.ToString();
 
-            return TryGetUsableAddress(Host, out IPAddress hostAddress)
-                ? hostAddress.ToString()
+            return TryGetUsableAddress(_resolvedIp, out IPAddress resolvedAddress)
+                ? resolvedAddress.ToString()
                 : "не определён";
         }
     }
@@ -73,6 +74,33 @@ public class DashboardTile : INotifyPropertyChanged
     };
 
     public Brush StatusBrush { get; private set; } = PingPalette.Neutral;
+
+    /// <summary>Среднее значение за интервал из настроек; null при неудачной последней проверке.</summary>
+    public double? AverageLatencyMs => PingStats.CurrentAverage(_history);
+
+    public string AveragePeriodLabel => $"СРЕДНИЙ ПИНГ ({PingStats.AverageIntervalSeconds} с)";
+
+    public bool ShowCurrentPing => PingDisplay.ShowCurrent;
+    public bool RdpAvailable { get; private set; }
+    public bool RdpButtonEnabled => IsOnline == true && RdpAvailable;
+
+    public string AverageText => AverageLatencyMs is double avg ? $"{avg:F0} ms" : "—";
+
+    public async Task<bool> UpdateRdpAvailabilityAsync()
+    {
+        bool available = await PingService.CheckRdpPortAsync(Host, timeoutMs: 700);
+        if (RdpAvailable != available)
+        {
+            RdpAvailable = available;
+            Refresh();
+        }
+        else if (IsOnline == true)
+        {
+            Refresh();
+        }
+
+        return available;
+    }
 
     /// <summary>Группа цвета: 0 — зелёный, 1 — жёлтый, 2 — красный, 3 — серый (нет пинга).</summary>
     public int ColorRank => LatencyMs switch

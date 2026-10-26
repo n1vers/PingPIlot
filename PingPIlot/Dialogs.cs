@@ -5,6 +5,7 @@ using ComboBox = System.Windows.Controls.ComboBox;
 using Control = System.Windows.Controls.Control;
 using Panel = System.Windows.Controls.Panel;
 using PingPilot.Models;
+using PingPilot.Services;
 
 namespace PingPilot;
 
@@ -179,19 +180,27 @@ public static class Dialogs
         root.Children.Add(input);
     }
 
-    private static Window MakeWindow(Window owner, string title, UIElement content, double width = 460) =>
-        new()
+    private static Window MakeWindow(Window owner, string title, UIElement content, double width = 460)
+    {
+        var window = new Window
         {
             Title = title,
             Owner = owner,
             Content = content,
-            Width = width,
+            Width = width * UiScaleService.Scale,
             SizeToContent = SizeToContent.Height,
             ResizeMode = ResizeMode.NoResize,
             ShowInTaskbar = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Style = Res<Style>("AppWindow")
         };
+
+        // Диалоги масштабируются вместе с главным окном.
+        if (content is FrameworkElement element)
+            UiScaleService.Attach(window, element);
+
+        return window;
+    }
 
     // validate возвращает текст ошибки или null, если всё в порядке.
     private static bool Show(

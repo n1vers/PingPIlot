@@ -30,24 +30,76 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Верхняя строка: слева группа, справа главные действия.
-                         При нехватке места левая часть переносится на новую строку. -->
-                    <Grid Grid.Row="0">
+                    <!-- Группы — вкладки: одним кликом, без выпадающего списка.
+                         Если вкладок много, они переносятся на новую строку. -->
+                    <ListBox x:Name="GroupTabs"
+                             Grid.Row="0"
+                             Margin="0,0,0,6"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             Padding="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                             SelectionChanged="GroupTabs_SelectionChanged">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" MaxWidth="260"/>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Margin" Value="0,0,8,8"/>
+                                <Setter Property="Padding" Value="18,9"/>
+                                <Setter Property="FontSize" Value="15"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                <Setter Property="Foreground" Value="{DynamicResource MutedBrush}"/>
+                                <Setter Property="Cursor" Value="Hand"/>
+                                <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="ListBoxItem">
+                                            <Border x:Name="Bd"
+                                                    Background="{DynamicResource SurfaceBrush}"
+                                                    BorderBrush="{DynamicResource LineBrush}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="8"
+                                                    Padding="{TemplateBinding Padding}">
+                                                <ContentPresenter VerticalAlignment="Center"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Surface2Brush}"/>
+                                                    <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                                </Trigger>
+                                                <Trigger Property="IsSelected" Value="True">
+                                                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                                    <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                                    <Setter Property="Foreground" Value="White"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                    </ListBox>
+
+                    <!-- Действия: слева управление группой, справа главные кнопки. -->
+                    <Grid Grid.Row="1">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
                         <WrapPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                            <ComboBox x:Name="GroupCombo"
-                                      Width="220"
-                                      Margin="0,0,8,0"
-                                      FontSize="15"
-                                      FontWeight="SemiBold"
-                                      DisplayMemberPath="Name"
-                                      SelectionChanged="GroupCombo_SelectionChanged"/>
                             <Button Content="+ Группа"
                                     Style="{StaticResource GhostButton}"
                                     Click="AddGroupButton_Click"/>
@@ -61,8 +113,11 @@
 
                         <StackPanel Grid.Column="1" Orientation="Horizontal"
                                     VerticalAlignment="Top" Margin="12,0,0,0">
-                            <Button Content="Проверить все"
+                            <Button x:Name="RefreshAllButton"
+                                    Content="Проверить все"
+                                    MinWidth="150"
                                     Margin="0,0,10,0"
+                                    ToolTip="Заново спросить DNS и проверить все компьютеры (во всех группах)"
                                     Click="RefreshButton_Click"/>
                             <Button Content="+ Компьютер"
                                     Style="{StaticResource PrimaryButton}"
@@ -72,14 +127,14 @@
 
                     <!-- Сводка занимает всю ширину и переносится по словам. -->
                     <TextBlock x:Name="SummaryText"
-                               Grid.Row="1"
+                               Grid.Row="2"
                                Foreground="{DynamicResource MutedBrush}"
                                FontSize="15"
                                Margin="2,14,0,0"
                                TextWrapping="Wrap"/>
 
                     <!-- Вид и сортировка переносятся, если окно узкое. -->
-                    <WrapPanel Grid.Row="2" Margin="0,10,0,0" Orientation="Horizontal">
+                    <WrapPanel Grid.Row="3" Margin="0,10,0,0" Orientation="Horizontal">
                         <TextBlock Text="Вид"
                                    Foreground="{DynamicResource MutedBrush}"
                                    VerticalAlignment="Center"
@@ -107,6 +162,30 @@
                             <ComboBoxItem Content="Цвет: проблемные первыми"/>
                             <ComboBoxItem Content="Имя: А → Я"/>
                         </ComboBox>
+
+                        <CheckBox x:Name="ShowCurrentPingCheckBox"
+                                  Content="Показывать текущий пинг"
+                                  VerticalAlignment="Center"
+                                  Margin="24,0,0,0"
+                                  ToolTip="Выключено — везде показывается только средний пинг"
+                                  Click="ShowCurrentPingCheckBox_Click"/>
+
+                        <!-- Масштаб интерфейса. То же делают Ctrl + колесо мыши и Ctrl + «+» / «-». -->
+                        <TextBlock Text="Масштаб"
+                                   Foreground="{DynamicResource MutedBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="24,0,6,0"/>
+                        <Button Content="−" MinHeight="34" MinWidth="38" Padding="0,2"
+                                ToolTip="Уменьшить (Ctrl + колесо вниз)"
+                                Click="ZoomOutButton_Click"/>
+                        <Button x:Name="ZoomResetButton" Content="100%"
+                                Style="{StaticResource GhostButton}"
+                                MinHeight="34" MinWidth="64" Padding="6,2"
+                                ToolTip="Сбросить масштаб (Ctrl + 0)"
+                                Click="ZoomResetButton_Click"/>
+                        <Button Content="+" MinHeight="34" MinWidth="38" Padding="0,2"
+                                ToolTip="Увеличить (Ctrl + колесо вверх)"
+                                Click="ZoomInButton_Click"/>
                     </WrapPanel>
                 </Grid>
 
@@ -120,7 +199,7 @@
                                     <!-- Колонки и размер плиток подбираются под ширину окна. -->
                                     <local:ResponsiveTilePanel MinTileWidth="260"
                                                                MaxTileWidth="440"
-                                                               MinTileHeight="270"
+                                                               MinTileHeight="290"
                                                                HeightRatio="0.95"
                                                                Spacing="16"/>
                                 </ItemsPanelTemplate>
@@ -133,14 +212,17 @@
                                         <Button.ContextMenu>
                                             <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                                                 <MenuItem Header="Проверить сейчас"
-                                                          Click="TilePingNow_Click"/>
-                                                <MenuItem Header="Копировать адрес"
-                                                          Click="TileCopyHost_Click"/>
-                                                <Separator/>
-                                                <MenuItem Header="Подробности и изменение..."
-                                                          Click="TileEdit_Click"/>
-                                                <MenuItem Header="Удалить компьютер"
-                                                          Click="TileDelete_Click"/>
+                                                              Click="TilePingNow_Click"/>
+                                                    <MenuItem Header="Подключиться по RDP"
+                                                              Click="TileRdp_Click"
+                                                              IsEnabled="{Binding RdpButtonEnabled}"/>
+                                                    <MenuItem Header="Копировать адрес"
+                                                              Click="TileCopyHost_Click"/>
+                                                    <Separator/>
+                                                    <MenuItem Header="Подробности и изменение..."
+                                                              Click="TileEdit_Click"/>
+                                                    <MenuItem Header="Удалить компьютер"
+                                                              Click="TileDelete_Click"/>
                                             </ContextMenu>
                                         </Button.ContextMenu>
                                         <Grid>
@@ -186,41 +268,77 @@
                                                     </TextBlock.Style>
                                                 </TextBlock>
 
-                                                <TextBlock Grid.Row="2"
-                                                           Text="{Binding IpAddressLabel}"
-                                                           Foreground="{DynamicResource MutedBrush}"
-                                                           FontSize="13"
-                                                           TextTrimming="CharacterEllipsis"/>
-
-                                                <!-- Главное число: задержка. Слева статус с цветной точкой. -->
-                                                <Grid Grid.Row="3" Margin="0,10,0,0">
+                                                <!-- IP слева, статус с цветной точкой справа. -->
+                                                <Grid Grid.Row="2">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*"/>
                                                         <ColumnDefinition Width="Auto"/>
                                                     </Grid.ColumnDefinitions>
-                                                    <StackPanel Orientation="Horizontal"
-                                                                VerticalAlignment="Center">
-                                                        <Ellipse Width="10" Height="10"
+                                                    <TextBlock Text="{Binding IpAddressLabel}"
+                                                               Foreground="{DynamicResource MutedBrush}"
+                                                               FontSize="13"
+                                                               VerticalAlignment="Center"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                    <StackPanel Grid.Column="1"
+                                                                Orientation="Horizontal"
+                                                                VerticalAlignment="Center"
+                                                                Margin="8,0,0,0">
+                                                        <Ellipse Width="9" Height="9"
                                                                  Fill="{Binding StatusBrush}"
                                                                  VerticalAlignment="Center"
-                                                                 Margin="0,1,8,0"/>
+                                                                 Margin="0,1,6,0"/>
                                                         <TextBlock Text="{Binding StatusLabel}"
                                                                    Foreground="{DynamicResource TextBrush}"
-                                                                   FontSize="14"
-                                                                   FontWeight="SemiBold"
-                                                                   TextTrimming="CharacterEllipsis"/>
+                                                                   FontSize="13"
+                                                                   FontWeight="SemiBold"/>
                                                     </StackPanel>
-                                                    <TextBlock Grid.Column="1"
-                                                               Text="{Binding LatencyText}"
-                                                               Foreground="{DynamicResource TextBrush}"
-                                                               FontSize="24"
-                                                               FontWeight="SemiBold"
-                                                               Margin="8,0,0,0"/>
+                                                </Grid>
+
+                                                <!-- Главное число — средний пинг; рядом — пинг последней проверки. -->
+                                                <Grid Grid.Row="3" Margin="0,8,0,0">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel>
+                                                        <TextBlock Text="{Binding AveragePeriodLabel}"
+                                                                   Foreground="{DynamicResource MutedBrush}"
+                                                                   FontSize="11"
+                                                                   FontWeight="SemiBold"/>
+                                                        <TextBlock Text="{Binding AverageText}"
+                                                                   Foreground="{DynamicResource TextBrush}"
+                                                                   FontSize="28"
+                                                                   FontWeight="SemiBold"/>
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="1"
+                                                                HorizontalAlignment="Right"
+                                                                VerticalAlignment="Bottom"
+                                                                Margin="12,0,0,3">
+                                                        <StackPanel.Style>
+                                                            <Style TargetType="StackPanel">
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding ShowCurrentPing}" Value="False">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </StackPanel.Style>
+                                                        <TextBlock Text="СЕЙЧАС"
+                                                                   Foreground="{DynamicResource MutedBrush}"
+                                                                   FontSize="11"
+                                                                   FontWeight="SemiBold"
+                                                                   HorizontalAlignment="Right"/>
+                                                        <TextBlock Text="{Binding LatencyText}"
+                                                                   Foreground="{DynamicResource TextBrush}"
+                                                                   FontSize="18"
+                                                                   FontWeight="SemiBold"
+                                                                   HorizontalAlignment="Right"/>
+                                                    </StackPanel>
                                                 </Grid>
 
                                                 <StackPanel Grid.Row="4"
                                                             Orientation="Horizontal"
-                                                            Margin="0,2,0,0">
+                                                            Margin="0,4,0,0">
                                                     <TextBlock Text="{Binding PacketLossText}"
                                                                Foreground="{DynamicResource MutedBrush}"
                                                                FontSize="12"/>
@@ -642,6 +760,7 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
 
                                 <TextBlock Grid.Row="0" Text="Интервал между циклами, мс"
@@ -660,9 +779,16 @@
 
                                 <TextBlock Grid.Row="2" Text="Период мини-графика и мини-матрицы, сек."
                                            TextWrapping="Wrap"
-                                           VerticalAlignment="Center"/>
-                                <TextBox x:Name="MiniHistorySecondsBox" Grid.Row="2" Grid.Column="1" Margin="12,0,0,0"/>
+                                           VerticalAlignment="Center" Margin="0,0,0,12"/>
+                                <TextBox x:Name="MiniHistorySecondsBox" Grid.Row="2" Grid.Column="1" Margin="12,0,0,12"/>
                                 <TextBlock Grid.Row="2" Grid.Column="2" Text="5–3600"
+                                           Style="{StaticResource Hint}"
+                                           VerticalAlignment="Center" Margin="12,0,0,12"/>
+
+                                <TextBlock Grid.Row="3" Text="Интервал среднего пинга, сек."
+                                           VerticalAlignment="Center"/>
+                                <TextBox x:Name="AverageIntervalSecondsBox" Grid.Row="3" Grid.Column="1" Margin="12,0,0,0"/>
+                                <TextBlock Grid.Row="3" Grid.Column="2" Text="1–60"
                                            Style="{StaticResource Hint}"
                                            VerticalAlignment="Center" Margin="12,0,0,0"/>
                             </Grid>

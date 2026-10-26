@@ -97,6 +97,10 @@
                         <Button Content="Проверить сейчас"
                                 Margin="8,0,0,0"
                                 Click="PingNowButton_Click"/>
+                        <Button Content="RDP"
+                                Margin="8,0,0,0"
+                                IsEnabled="{Binding RdpButtonEnabled}"
+                                Click="RdpButton_Click"/>
                         <Button Content="Удалить"
                                 Style="{StaticResource DangerButton}"
                                 Margin="8,0,0,0"

@@ -15,8 +15,9 @@ using Point = System.Windows.Point;
 namespace PingPilot;
 
 /// <summary>
-/// График пинга по истории плитки. Цветные зоны: до 15 мс, до 50 мс и выше;
-/// неудачные проверки показаны серыми полосами.
+/// График пинга по истории плитки. Цветные зоны: до 15 мс, до 50 мс и выше.
+/// Основная линия — средний пинг (скользящее среднее), бледная тонкая линия — пинг каждой проверки.
+/// Неудачные проверки (нет ответа) показаны красными полосами.
 /// </summary>
 public class PingGraph : FrameworkElement
 {
@@ -27,7 +28,7 @@ public class PingGraph : FrameworkElement
     private static readonly Brush GoodZone = PingPalette.Make(0x22, 0xC5, 0x5E, 0x22);
     private static readonly Brush FairZone = PingPalette.Make(0xEA, 0xB3, 0x08, 0x22);
     private static readonly Brush PoorZone = PingPalette.Make(0xEF, 0x44, 0x44, 0x22);
-    private static readonly Brush FailBrush = PingPalette.Make(0x6B, 0x72, 0x80, 0x55);
+    private static readonly Brush FailBrush = PingPalette.Make(0xEF, 0x44, 0x44, 0x70);
 
     public static readonly DependencyProperty TileProperty = DependencyProperty.Register(
         nameof(Tile), typeof(DashboardTile), typeof(PingGraph),
@@ -38,6 +39,7 @@ public class PingGraph : FrameworkElement
         new FrameworkPropertyMetadata(true, FrameworkPropertyMetadataOptions.AffectsRender));
 
     private PingSample[] _samples = Array.Empty<PingSample>();
+    private double?[] _averages = Array.Empty<double?>();
     private Rect _plot;
     private bool _isAttached;
 
@@ -111,6 +113,17 @@ public class PingGraph : FrameworkElement
         _samples = Tile == null
             ? Array.Empty<PingSample>()
             : UseMiniHistory ? Tile.GetMiniHistory() : Tile.GetHistory();
+        // Среднее строится по интервалам, заданным в настройках. При скрытом текущем ping
+        // отображаем одну агрегированную точку на интервал.
+        if (PingDisplay.ShowCurrent)
+        {
+            _averages = PingStats.RollingAverage(_samples);
+        }
+        else
+        {
+            _samples = PingStats.ToBuckets(_samples, DateTime.Now);
+            _averages = _samples.Select(s => (double?)s.LatencyMs).ToArray();
+        }
         // Цвета берём из текущей темы, чтобы график читался и на светлом, и на тёмном фоне.
         Brush axisBrush = ThemeBrush("MutedBrush", AxisBrush);
         Brush lineBrush = ThemeBrush("GraphLineBrush", LineBrush);
@@ -122,6 +135,7 @@ public class PingGraph : FrameworkElement
         {
             LineJoin = PenLineJoin.Round
         };
+        var rawPen = new Pen(lineBrush, 1) { LineJoin = PenLineJoin.Round };
 
         // Слева оставляем место под подписи оси Y — и в мини-режиме тоже,
         // иначе подписи рисовались за границей элемента и обрезались.
@@ -141,11 +155,20 @@ public class PingGraph : FrameworkElement
             return;
         }
 
-        double maxLatency = _samples
-            .Where(s => s.LatencyMs.HasValue)
-            .Select(s => (double)s.LatencyMs!.Value)
-            .DefaultIfEmpty(0)
-            .Max();
+        bool showCurrent = PingDisplay.ShowCurrent;
+
+        // Если текущий пинг скрыт, шкала подбирается по среднему.
+        double maxLatency = showCurrent
+            ? _samples
+                .Where(s => s.LatencyMs.HasValue)
+                .Select(s => (double)s.LatencyMs!.Value)
+                .DefaultIfEmpty(0)
+                .Max()
+            : _averages
+                .Where(a => a.HasValue)
+                .Select(a => a!.Value)
+                .DefaultIfEmpty(0)
+                .Max();
 
         // Шкала всегда показывает пороги 15 и 50 мс.
         double yMax = Math.Max(60, Math.Ceiling(maxLatency * 1.15 / 10) * 10);
@@ -185,7 +208,7 @@ public class PingGraph : FrameworkElement
         double step = n > 1 ? plot.Width / (n - 1) : 0;
         double X(int i) => n > 1 ? plot.Left + i * step : plot.Right;
 
-        // Неудачные проверки: серые вертикальные полосы.
+        // Неудачные проверки: красные вертикальные полосы.
         double barWidth = Math.Max(step, 2);
         for (int i = 0; i < n; i++)
         {
@@ -196,38 +219,27 @@ public class PingGraph : FrameworkElement
                 Math.Max(plot.Left, X(i) - barWidth / 2), plot.Top, barWidth, plot.Height));
         }
 
-        // Линия пинга; при неудачной проверке линия прерывается.
-        var geometry = new StreamGeometry();
-        using (StreamGeometryContext context = geometry.Open())
+        // Бледная тонкая линия: пинг каждой проверки. Помогает увидеть всплески.
+        if (showCurrent)
         {
-            bool figureOpen = false;
-            for (int i = 0; i < n; i++)
-            {
-                if (_samples[i].LatencyMs is not long ms)
-                {
-                    figureOpen = false;
-                    continue;
-                }
-
-                var point = new Point(X(i), Y(ms));
-                if (!figureOpen)
-                {
-                    context.BeginFigure(point, false, false);
-                    figureOpen = true;
-                }
-                else
-                {
-                    context.LineTo(point, true, false);
-                }
-            }
+            dc.PushOpacity(0.35);
+            dc.DrawGeometry(null, rawPen, BuildLine(n, X, i => _samples[i].LatencyMs, Y));
+            dc.Pop();
         }
-        geometry.Freeze();
-        dc.DrawGeometry(null, linePen, geometry);
 
-        // Точки окрашены по порогам; при большой истории рисуем только последнюю.
+        // Основная линия — средний пинг; при неудачной проверке линия прерывается.
+        dc.DrawGeometry(null, linePen, BuildLine(n, X, i => _averages[i], Y));
+
+        // Точки среднего окрашены по порогам; при большой истории рисуем только последнюю.
         for (int i = 0; i < n; i++)
         {
-            if (_samples[i].LatencyMs is not long ms)
+            if (_averages[i] is not double avg)
+                continue;
+
+            // Не рисуем маркер для каждой проверки внутри одного интервала: десятки
+            // окружностей поверх одной линии создавали эффект повторной прорисовки.
+            long bucket = PingStats.GetBucketId(_samples[i].Time);
+            if (i + 1 < n && PingStats.GetBucketId(_samples[i + 1].Time) == bucket)
                 continue;
 
             bool isLast = i == n - 1;
@@ -235,9 +247,16 @@ public class PingGraph : FrameworkElement
                 continue;
 
             double radius = UseMiniHistory
-     ? (isLast ? 2.0 : 0.8)
-     : (isLast ? 5.0 : 3.4);
-            dc.DrawEllipse(PingPalette.For(ms), null, new Point(X(i), Y(ms)), radius, radius);
+                ? (isLast ? 2.4 : 0.8)
+                : (isLast ? 5.0 : 3.4);
+            dc.DrawEllipse(PingPalette.For((long)Math.Round(avg)), null, new Point(X(i), Y(avg)), radius, radius);
+        }
+
+        // Пинг последней проверки («сейчас») — маленькая точка с обводкой поверх среднего.
+        if (showCurrent && _samples[n - 1].LatencyMs is long current)
+        {
+            double r = UseMiniHistory ? 2.2 : 4.0;
+            dc.DrawEllipse(PingPalette.For(current), new Pen(lineBrush, 1.2), new Point(X(n - 1), Y(current)), r, r);
         }
 
         // Подписи времени есть только в полном режиме: в мини-режиме под графиком нет места.
@@ -267,8 +286,10 @@ public class PingGraph : FrameworkElement
         index = Math.Clamp(index, 0, _samples.Length - 1);
 
         PingSample sample = _samples[index];
-        ToolTip = sample.LatencyMs.HasValue
-            ? $"{sample.Time:HH:mm:ss} — {sample.LatencyMs} ms"
+        ToolTip = sample.LatencyMs.HasValue && index < _averages.Length && _averages[index] is double avg
+            ? (PingDisplay.ShowCurrent
+                ? $"{sample.Time:HH:mm:ss} — среднее {avg:F0} ms, пинг {sample.LatencyMs} ms"
+                : $"{sample.Time:HH:mm:ss} — среднее {avg:F0} ms")
             : $"{sample.Time:HH:mm:ss} — {sample.Status}";
     }
 
@@ -276,6 +297,38 @@ public class PingGraph : FrameworkElement
     {
         base.OnMouseLeave(e);
         ToolTip = null;
+    }
+
+    // Ломаная по значениям; пропуск (null) разрывает линию.
+    private static StreamGeometry BuildLine(
+        int count, Func<int, double> x, Func<int, double?> value, Func<double, double> y)
+    {
+        var geometry = new StreamGeometry();
+        using (StreamGeometryContext context = geometry.Open())
+        {
+            bool figureOpen = false;
+            for (int i = 0; i < count; i++)
+            {
+                if (value(i) is not double v)
+                {
+                    figureOpen = false;
+                    continue;
+                }
+
+                var point = new Point(x(i), y(v));
+                if (!figureOpen)
+                {
+                    context.BeginFigure(point, false, false);
+                    figureOpen = true;
+                }
+                else
+                {
+                    context.LineTo(point, true, false);
+                }
+            }
+        }
+        geometry.Freeze();
+        return geometry;
     }
 
     private static Rect ZoneRect(Rect plot, double top, double bottom) =>

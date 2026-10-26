@@ -43,17 +43,28 @@ public partial class MainWindow : Window
     private bool _sessionWriteErrorShown;
     private Forms.NotifyIcon? _trayIcon;
     private const int MaxLiveSessionRows = 3000;
+    private const int PingTimeoutMs = 800;
+    private const int ForcedPingTimeoutMs = 3000;
+    private bool _manualCheckRunning;
 
-    private ComputerGroup? CurrentGroup => GroupCombo.SelectedItem as ComputerGroup;
+    private ComputerGroup? CurrentGroup => GroupTabs.SelectedItem as ComputerGroup;
 
     private const double MinUiScale = 0.7;
     private const double MaxUiScale = 2.0;
     private const double UiScaleStep = 0.1;
 
+    // Масштаб сохраняется не на каждое деление колеса, а когда пользователь закончил крутить.
+    private readonly DispatcherTimer _scaleSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(600) };
+
     public MainWindow()
     {
         InitializeComponent();
         FitWindowToScreen();
+        _scaleSaveTimer.Tick += (_, _) =>
+        {
+            _scaleSaveTimer.Stop();
+            SaveData();
+        };
 
         _currentSession = _sessionStore.StartSession();
         SessionsGrid.ItemsSource = _savedSessions;
@@ -92,6 +103,11 @@ public partial class MainWindow : Window
         {
             _timer.Stop();
             _autoScanTimer.Stop();
+            if (_scaleSaveTimer.IsEnabled)
+            {
+                _scaleSaveTimer.Stop();
+                SaveData();
+            }
             _scanCts?.Cancel();
             _trayIcon?.Dispose();
             _sessionStore.Dispose();
@@ -105,11 +121,18 @@ public partial class MainWindow : Window
         PingIntervalBox.Text = Math.Clamp(settings.PingIntervalMilliseconds, 100, 60000).ToString();
         PacketsPerCycleBox.Text = Math.Clamp(settings.PacketsPerCycle, 1, 20).ToString();
         MiniHistorySecondsBox.Text = Math.Clamp(settings.MiniHistorySeconds, 5, 3600).ToString();
+        settings.AverageIntervalSeconds = Math.Clamp(settings.AverageIntervalSeconds, 1, 60);
+        AverageIntervalSecondsBox.Text = settings.AverageIntervalSeconds.ToString();
+        PingStats.ConfigureAverageInterval(settings.AverageIntervalSeconds);
         ThemeCombo.SelectedIndex = string.Equals(settings.Theme, "Light", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         StartWithWindowsCheckBox.IsChecked = settings.StartWithWindows;
         MinimizeToTrayCheckBox.IsChecked = settings.MinimizeToTray;
+        PingDisplay.ShowCurrent = settings.ShowCurrentPing;
+        ShowCurrentPingCheckBox.IsChecked = settings.ShowCurrentPing;
         SetUiScale(settings.UiScale, save: false);
         ApplyTheme(settings.Theme);
+        foreach (DashboardTile tile in _tileCache.Values)
+            tile.Refresh();
     }
 
     // ---------- Масштаб и размер окна ----------
@@ -132,15 +155,20 @@ public partial class MainWindow : Window
         if (double.IsNaN(scale) || double.IsInfinity(scale) || scale <= 0)
             scale = 1.0;
 
-        scale = Math.Round(Math.Clamp(scale, MinUiScale, MaxUiScale), 2);
+        scale = Math.Round(Math.Clamp(scale, MinUiScale, MaxUiScale), 3);
         UiScale.ScaleX = scale;
         UiScale.ScaleY = scale;
+        ZoomResetButton.Content = $"{Math.Round(scale * 100):0}%";
 
-        if (!save || _data?.UserSettings == null || Math.Abs(_data.UserSettings.UiScale - scale) < 0.001)
+        // Окна подробностей и диалоги масштабируются вместе с главным окном.
+        UiScaleService.Set(scale);
+
+        if (!save || _data?.UserSettings == null || Math.Abs(_data.UserSettings.UiScale - scale) < 0.0005)
             return;
 
         _data.UserSettings.UiScale = scale;
-        SaveData();
+        _scaleSaveTimer.Stop();
+        _scaleSaveTimer.Start();
     }
 
     private void Window_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
@@ -148,9 +176,32 @@ public partial class MainWindow : Window
         if ((Keyboard.Modifiers & ModifierKeys.Control) == 0)
             return;
 
-        SetUiScale(UiScale.ScaleX + (e.Delta > 0 ? UiScaleStep : -UiScaleStep));
+        // Плавный масштаб: один «щелчок» колеса (120) = ±10%, а мелкие шаги тачпада
+        // дают пропорционально меньшее изменение, а не прыгают сразу на 10%.
+        SetUiScale(UiScale.ScaleX * Math.Pow(1 + UiScaleStep, e.Delta / 120.0));
         e.Handled = true;
     }
+
+    private void ShowCurrentPingCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        bool show = ShowCurrentPingCheckBox.IsChecked == true;
+        PingDisplay.ShowCurrent = show;
+        _data.UserSettings.ShowCurrentPing = show;
+        SaveData();
+
+        // Обновляем плитки, графики и окна подробностей.
+        foreach (DashboardTile tile in _tileCache.Values)
+            tile.Refresh();
+    }
+
+    private void ZoomInButton_Click(object sender, RoutedEventArgs e) =>
+        SetUiScale(UiScale.ScaleX + UiScaleStep);
+
+    private void ZoomOutButton_Click(object sender, RoutedEventArgs e) =>
+        SetUiScale(UiScale.ScaleX - UiScaleStep);
+
+    private void ZoomResetButton_Click(object sender, RoutedEventArgs e) =>
+        SetUiScale(1.0);
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -182,20 +233,26 @@ public partial class MainWindow : Window
     {
         if (!int.TryParse(PingIntervalBox.Text, out int interval) || interval is < 100 or > 60000 ||
             !int.TryParse(PacketsPerCycleBox.Text, out int packets) || packets is < 1 or > 20 ||
-            !int.TryParse(MiniHistorySecondsBox.Text, out int miniHistorySeconds) || miniHistorySeconds is < 5 or > 3600)
+            !int.TryParse(MiniHistorySecondsBox.Text, out int miniHistorySeconds) || miniHistorySeconds is < 5 or > 3600 ||
+            !int.TryParse(AverageIntervalSecondsBox.Text, out int averageIntervalSeconds) || averageIntervalSeconds is < 1 or > 60)
         {
-            SettingsStatusText.Text = "Укажите интервал 100–60000 мс, пакеты 1–20 и период mini-истории 5–3600 секунд.";
+            SettingsStatusText.Text = "Укажите интервал ping 100–60000 мс, пакеты 1–20, mini-историю 5–3600 секунд и среднее 1–60 секунд.";
             return;
         }
 
         _data.UserSettings.PingIntervalMilliseconds = interval;
         _data.UserSettings.PacketsPerCycle = packets;
         _data.UserSettings.MiniHistorySeconds = miniHistorySeconds;
+        _data.UserSettings.AverageIntervalSeconds = averageIntervalSeconds;
+        PingStats.ConfigureAverageInterval(averageIntervalSeconds);
         foreach (DashboardTile tile in _tileCache.Values)
+        {
             tile.SetMiniHistorySeconds(miniHistorySeconds);
+            tile.Refresh();
+        }
         _timer.Interval = TimeSpan.FromMilliseconds(interval);
         SaveData();
-        SettingsStatusText.Text = $"Параметры применены: ping каждые {interval} мс, пакетов: {packets}, mini-история: {miniHistorySeconds} с.";
+        SettingsStatusText.Text = $"Параметры применены: ping каждые {interval} мс, пакетов: {packets}, mini-история: {miniHistorySeconds} с, среднее: {averageIntervalSeconds} с.";
         _ = RefreshTilesAsync();
     }
 
@@ -367,9 +424,9 @@ public partial class MainWindow : Window
         Guid? id = select ?? CurrentGroup?.Id;
 
         _loadingGroups = true;
-        GroupCombo.ItemsSource = null;
-        GroupCombo.ItemsSource = _data.Groups;
-        GroupCombo.SelectedItem =
+        GroupTabs.ItemsSource = null;
+        GroupTabs.ItemsSource = _data.Groups;
+        GroupTabs.SelectedItem =
             _data.Groups.FirstOrDefault(g => g.Id == id) ?? _data.Groups.FirstOrDefault();
         _loadingGroups = false;
 
@@ -444,7 +501,16 @@ public partial class MainWindow : Window
                 .Select(GetOrCreateTile)
                 .ToArray();
 
-            await Task.WhenAll(allTiles.Select(PingTileAsync));
+            // Каждая плитка проверяется сама по себе: медленный или выключенный компьютер
+            // не задерживает остальные, и текущий пинг обновляется с интервалом из настроек.
+            // Плитку, которая ещё проверяется, пропускаем.
+            Task[] running = allTiles
+                .Where(tile => !tile.Busy)
+                .Select(tile => PingTileAsync(tile))
+                .ToArray();
+
+            // Ждём быстрые ответы (не дольше 300 мс), остальные доработают в фоне.
+            await Task.WhenAny(Task.WhenAll(running), Task.Delay(300));
             ApplySort();
             UpdateSummary();
         }
@@ -474,8 +540,17 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task PingTileAsync(DashboardTile tile)
+    // Обычная проверка по таймеру или полная (force) — «Проверить все» и «Проверить сейчас»:
+    // DNS спрашивается заново, на каждый адрес до двух попыток и тайм-аут как у ping.exe.
+    private async Task PingTileAsync(DashboardTile tile, bool force = false)
     {
+        // Ручная проверка не пропускается, если плитка занята автоматической, а ждёт её конца.
+        if (force)
+        {
+            for (int i = 0; i < 60 && tile.Busy; i++)
+                await Task.Delay(100);
+        }
+
         await _pingSemaphore.WaitAsync();
         try
         {
@@ -485,13 +560,18 @@ public partial class MainWindow : Window
             tile.Busy = true;
             try
             {
-                int packets = Math.Clamp(_data.UserSettings?.PacketsPerCycle ?? 1, 1, 20);
+                int packets = force ? 1 : Math.Clamp(_data.UserSettings?.PacketsPerCycle ?? 1, 1, 20);
+                int timeoutMs = force ? ForcedPingTimeoutMs : PingTimeoutMs;
+
                 for (int i = 0; i < packets; i++)
                 {
-                    PingResult result = await PingService.PingAsync(tile.PingTarget, timeoutMs: 800);
+                    PingResult result = await PingService.PingAsync(tile.PingTarget, timeoutMs, deepCheck: force);
                     tile.Apply(result);
                     RecordPingResult(tile, result);
                 }
+
+                if (tile.IsOnline == true)
+                    await tile.UpdateRdpAvailabilityAsync();
             }
             finally
             {
@@ -501,6 +581,30 @@ public partial class MainWindow : Window
         finally
         {
             _pingSemaphore.Release();
+        }
+    }
+
+    private async Task OpenRdpAsync(DashboardTile tile)
+    {
+        bool available = await tile.UpdateRdpAvailabilityAsync();
+        if (!available)
+        {
+            ShowWarning("Подключение по RDP недоступно: порт 3389 закрыт или компьютер не отвечает.");
+            return;
+        }
+
+        string target = !string.Equals(tile.IpAddressText, "не определён", StringComparison.OrdinalIgnoreCase)
+            ? tile.IpAddressText
+            : tile.Host;
+
+        try
+        {
+            Process.Start(new ProcessStartInfo("mstsc.exe", $"/v:{target}") { UseShellExecute = true });
+            SummaryText.Text = $"Запущено подключение по RDP к {target}";
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось открыть клиент RDP.", ex);
         }
     }
 
@@ -556,7 +660,7 @@ public partial class MainWindow : Window
         return added;
     }
 
-    private void GroupCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void GroupTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_loadingGroups)
             return;
@@ -635,9 +739,17 @@ public partial class MainWindow : Window
         if (sender is not FrameworkElement { DataContext: DashboardTile tile })
             return;
 
-        await PingTileAsync(tile);
+        await PingTileAsync(tile, force: true);
         ApplySort();
         UpdateSummary();
+    }
+
+    private async void TileRdp_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: DashboardTile tile })
+            return;
+
+        await OpenRdpAsync(tile);
     }
 
     private void TileCopyHost_Click(object sender, RoutedEventArgs e)
@@ -692,10 +804,11 @@ public partial class MainWindow : Window
             DeleteComputer,
             async t =>
             {
-                await PingTileAsync(t);
+                await PingTileAsync(t, force: true);
                 ApplySort();
                 UpdateSummary();
-            });
+            },
+            async t => await OpenRdpAsync(t));
 
         _detailWindows[id] = window;
         window.Closed += (_, _) => _detailWindows.Remove(id);
@@ -774,9 +887,58 @@ public partial class MainWindow : Window
             window.Close();
     }
 
+    // «Проверить все»: настоящая повторная проверка всех компьютеров, а не пропуск цикла,
+    // когда автоматическая проверка уже идёт (она идёт почти всегда).
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
-        await RefreshTilesAsync();
+        if (_manualCheckRunning)
+            return;
+
+        _manualCheckRunning = true;
+        RefreshAllButton.IsEnabled = false;
+        RefreshAllButton.Content = "Проверяю…";
+
+        try
+        {
+            // Даём закончиться текущему автоматическому циклу (не дольше 10 секунд).
+            for (int i = 0; i < 100 && _refreshInProgress; i++)
+                await Task.Delay(100);
+
+            // На время ручной проверки автоматические тики пропускаются.
+            _refreshInProgress = true;
+            try
+            {
+                // Забываем найденные по DNS адреса: имена будут разрешены заново.
+                PingService.ClearDnsCache();
+
+                DashboardTile[] all = _data.Computers.Select(GetOrCreateTile).ToArray();
+                int done = 0;
+
+                await Task.WhenAll(all.Select(async tile =>
+                {
+                    await PingTileAsync(tile, force: true);
+                    done++;
+                    RefreshAllButton.Content = $"Проверяю… {done}/{all.Length}";
+                }));
+
+                ApplySort();
+                UpdateSummary();
+            }
+            finally
+            {
+                _refreshInProgress = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Manual check failed: {ex}");
+        }
+        finally
+        {
+            RefreshAllButton.Content = "Проверить все";
+            RefreshAllButton.IsEnabled = true;
+            _manualCheckRunning = false;
+        }
     }
 
     // ---------- Сессии мониторинга ----------

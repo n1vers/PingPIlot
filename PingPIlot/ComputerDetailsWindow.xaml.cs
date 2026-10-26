@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Media;
 using PingPilot.Models;
+using PingPilot.Services;
 
 namespace PingPilot;
 
@@ -15,17 +16,20 @@ public partial class ComputerDetailsWindow : Window
     private readonly Func<DashboardTile, string, string, Guid, string?> _save;
     private readonly Func<DashboardTile, bool> _delete;
     private readonly Func<DashboardTile, Task> _pingNow;
+    private readonly Func<DashboardTile, Task> _rdpOpen;
 
     /// <param name="save">Сохраняет изменения; возвращает null при успехе или текст ошибки.</param>
     /// <param name="delete">Удаляет компьютер (с подтверждением); true — удалён.</param>
     /// <param name="pingNow">Немедленно проверяет компьютер.</param>
+    /// <param name="rdpOpen">Открывает подключение по RDP после проверки доступности порта.</param>
     public ComputerDetailsWindow(
         Window owner,
         DashboardTile tile,
         IReadOnlyList<ComputerGroup> groups,
         Func<DashboardTile, string, string, Guid, string?> save,
         Func<DashboardTile, bool> delete,
-        Func<DashboardTile, Task> pingNow)
+        Func<DashboardTile, Task> pingNow,
+        Func<DashboardTile, Task> rdpOpen)
     {
         InitializeComponent();
 
@@ -34,14 +38,17 @@ public partial class ComputerDetailsWindow : Window
         _save = save;
         _delete = delete;
         _pingNow = pingNow;
+        _rdpOpen = rdpOpen;
 
         var workArea = SystemParameters.WorkArea;
 
         MaxWidth = workArea.Width;
         MaxHeight = workArea.Height;
 
-        Width = Math.Min(Width, workArea.Width);
-        Height = Math.Min(Height, workArea.Height);
+        // Окно подробностей масштабируется вместе с главным окном.
+        UiScaleService.Attach(this, (FrameworkElement)Content);
+        Width = Math.Min(Width * UiScaleService.Scale, workArea.Width);
+        Height = Math.Min(Height * UiScaleService.Scale, workArea.Height);
 
         DataContext = tile;
         Graph.Tile = tile;
@@ -79,6 +86,9 @@ public partial class ComputerDetailsWindow : Window
 
     private async void PingNowButton_Click(object sender, RoutedEventArgs e) =>
         await _pingNow(_tile);
+
+    private async void RdpButton_Click(object sender, RoutedEventArgs e) =>
+        await _rdpOpen(_tile);
 
     private void OpenGraphButton_Click(object sender, RoutedEventArgs e)
     {
