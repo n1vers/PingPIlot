@@ -26,6 +26,8 @@ public sealed class SessionStoreService : IDisposable
     private string? _activeLogPath;
     private MonitoringSession? _activeSession;
     private bool _finished;
+    private int _writesSinceFlush;
+    private const int FlushEveryEntries = 50;
 
     public SessionStoreService()
     {
@@ -54,8 +56,9 @@ public sealed class SessionStoreService : IDisposable
 
             _activeWriter = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
             {
-                AutoFlush = true
+                AutoFlush = false
             };
+            _writesSinceFlush = 0;
             _activeSession = session;
             _computerIds.Clear();
             _entryCountsByGroup.Clear();
@@ -73,6 +76,14 @@ public sealed class SessionStoreService : IDisposable
                 return;
 
             _activeWriter.WriteLine(JsonSerializer.Serialize(entry));
+            _writesSinceFlush++;
+            // Flush in batches rather than forcing a disk flush for every ping.
+            // This lowers I/O overhead during long monitoring sessions.
+            if (_writesSinceFlush >= FlushEveryEntries)
+            {
+                _activeWriter.Flush();
+                _writesSinceFlush = 0;
+            }
             session.EntryCount++;
             if (_computerIds.Add(entry.ComputerId))
                 session.ComputerCount = _computerIds.Count;
@@ -144,6 +155,7 @@ public sealed class SessionStoreService : IDisposable
             try
             {
                 _activeWriter?.Flush();
+                _writesSinceFlush = 0;
                 _activeWriter?.Dispose();
                 _activeWriter = null;
 
@@ -218,8 +230,9 @@ public sealed class SessionStoreService : IDisposable
                         new FileStream(_activeLogPath, FileMode.Append, FileAccess.Write, FileShare.Read),
                         new UTF8Encoding(false))
                     {
-                        AutoFlush = true
+                        AutoFlush = false
                     };
+                    _writesSinceFlush = 0;
                 }
 
                 session.EntryCount = originalEntryCount;

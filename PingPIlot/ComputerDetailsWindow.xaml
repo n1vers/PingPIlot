@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:PingPilot"
         Title="Подробности компьютера"
-        Width="900" Height="700"
+        Width="1100" Height="820"
         MinWidth="650" MinHeight="450"
         WindowStartupLocation="CenterOwner"
         ResizeMode="CanResize"
@@ -35,7 +35,7 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
-                <RowDefinition Height="360"/>
+                <RowDefinition Height="300"/>
             </Grid.RowDefinitions>
 
             <!-- ===== Заголовок ===== -->

@@ -41,14 +41,15 @@ public partial class ComputerDetailsWindow : Window
         _rdpOpen = rdpOpen;
 
         var workArea = SystemParameters.WorkArea;
+        MaxWidth = Math.Max(650, workArea.Width);
+        MaxHeight = Math.Max(450, workArea.Height);
 
-        MaxWidth = workArea.Width;
-        MaxHeight = workArea.Height;
-
-        // Окно подробностей масштабируется вместе с главным окном.
+        // Открываем окно в пределах рабочей области даже при масштабировании Windows.
+        // Контент прокручивается, а не обрезается при невысоком экране.
         UiScaleService.Attach(this, (FrameworkElement)Content);
-        Width = Math.Min(Width * UiScaleService.Scale, workArea.Width);
-        Height = Math.Min(Height * UiScaleService.Scale, workArea.Height);
+        Width = Math.Min(Math.Max(900, Width * UiScaleService.Scale), workArea.Width);
+        Height = Math.Min(Math.Max(650, Height * UiScaleService.Scale), workArea.Height);
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
         DataContext = tile;
         Graph.Tile = tile;

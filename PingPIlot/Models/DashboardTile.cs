@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Net;
 using System.Windows.Media;
 using Brush = System.Windows.Media.Brush;
@@ -22,6 +22,7 @@ public class DashboardTile : INotifyPropertyChanged
     private DateTime? _lastOnline;
     private DateTime? _stateSince;
     private string? _resolvedIp;
+    private int _consecutiveTimeouts;
 
     public DashboardTile(SavedComputer computer) => Computer = computer;
 
@@ -115,8 +116,8 @@ public class DashboardTile : INotifyPropertyChanged
     public string LastOnlineText => _lastOnline?.ToString("dd.MM HH:mm:ss") ?? "ещё не был онлайн";
     public string PacketLossText => _sent == 0
         ? "Потери: —"
-        : $"Потери: {LossPercent:F1}%";
-    public string LossPercentText => _sent == 0 ? "—" : $"{LossPercent:F1}%";
+        : $"Потери: {_sent - _received} ({LossPercent:F1}%)";
+    public string LossPercentText => _sent == 0 ? "—" : $"{_sent - _received} ({LossPercent:F1}%)";
     public string SentReceivedText => $"{_sent} / {_received}";
 
     public string StateText
@@ -178,7 +179,7 @@ public class DashboardTile : INotifyPropertyChanged
                 return $"Адрес: {Host}\nIP: {IpAddressText}{description}\nЕщё не проверялся";
 
             string checkedText = _lastChecked?.ToString("HH:mm:ss") ?? "—";
-            return $"Адрес: {Host}\nIP: {IpAddressText}{description}\nПроверок: {_sent}, получено: {_received}, потери: {LossPercent:F1}%\nПоследняя проверка: {checkedText}\nНажмите, чтобы открыть подробности";
+            return $"Адрес: {Host}\nIP: {IpAddressText}{description}\nПроверок: {_sent}, получено: {_received}, потери: {_sent - _received} ({LossPercent:F1}%)\nПоследняя проверка: {checkedText}\nНажмите, чтобы открыть подробности";
         }
     }
 
@@ -204,6 +205,7 @@ public class DashboardTile : INotifyPropertyChanged
 
         if (result.Ok)
         {
+            _consecutiveTimeouts = 0;
             _received++;
             _lastOnline = now;
             IsOnline = true;
@@ -216,11 +218,21 @@ public class DashboardTile : INotifyPropertyChanged
         }
         else
         {
-            // Тайм-аут и любые ошибки — это неудачная проверка, мониторинг продолжается.
-            // Устройство недоступно или проверка завершилась ошибкой — серый цвет.
+            // DNS-ошибка показывается сразу, если имя не удалось разрешить.
+            // При известном адресе сначала показываем тайм-аут, затем «Недоступен».
+            if (string.Equals(result.Status, "Timeout", StringComparison.OrdinalIgnoreCase))
+            {
+                _consecutiveTimeouts++;
+                StatusText = _consecutiveTimeouts >= 3 ? "Unreachable" : "Timeout";
+            }
+            else
+            {
+                _consecutiveTimeouts = 0;
+                StatusText = result.Status;
+            }
+
             IsOnline = false;
             LatencyMs = null;
-            StatusText = result.Status;
             LatencyText = "—";
             StatusBrush = PingPalette.Neutral;
         }

@@ -322,6 +322,32 @@ public partial class MainWindow : Window
         SettingsStatusText.Text = "Настройка трея сохранена.";
     }
 
+    private static System.Drawing.Icon GetApplicationIcon()
+    {
+        // Извлекаем значок из EXE: он задаётся через ApplicationIcon в csproj
+        // и доступен также в single-file публикации.
+        var executablePath = Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(executablePath))
+        {
+            try
+            {
+                var icon = System.Drawing.Icon.ExtractAssociatedIcon(executablePath);
+                if (icon is not null)
+                    return icon;
+            }
+            catch (ArgumentException)
+            {
+                // Используем системный значок как резервный вариант.
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // Используем системный значок как резервный вариант.
+            }
+        }
+
+        return (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone();
+    }
+
     private void UpdateTrayIcon()
     {
         if (_data.UserSettings.MinimizeToTray)
@@ -336,7 +362,7 @@ public partial class MainWindow : Window
 
             _trayIcon = new Forms.NotifyIcon
             {
-                Icon = System.Drawing.SystemIcons.Application,
+                Icon = GetApplicationIcon(),
                 Text = "PingPilot",
                 ContextMenuStrip = menu,
                 Visible = true
