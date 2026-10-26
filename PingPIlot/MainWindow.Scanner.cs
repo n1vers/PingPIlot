@@ -30,7 +30,7 @@ public partial class MainWindow
     private void InitializeScannerSettings()
     {
         _loadingScannerSettings = true;
-        ScannerSettings settings = _data.ScanSettings ?? new ScannerSettings();
+        ScannerSettings settings = _data.ScanSettings ??= new ScannerSettings();
         ScanTargetModeCombo.SelectedIndex =
             string.Equals(settings.TargetMode, "IpRange", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         RangeStartBox.Text = settings.RangeStart ?? string.Empty;
@@ -59,7 +59,7 @@ public partial class MainWindow
             _loadingScannerSettings = true;
             AutoScanCheckBox.IsChecked = false;
             _loadingScannerSettings = false;
-            _data.ScanSettings.AutoScanEnabled = false;
+            settings.AutoScanEnabled = false;
             SaveData();
             AutoScanStatusText.Text = "Автосканирование выключено: проверьте настройки.";
             return;

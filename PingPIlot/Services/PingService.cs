@@ -23,6 +23,7 @@ public static class PingService
 
     // Одно имя может вернуть несколько адресов (старая запись, VPN, IPv6). Пробуем несколько.
     private const int MaxCandidates = 4;
+    private const int RdpPort = 3389;
 
     private sealed class DnsEntry
     {
@@ -51,6 +52,61 @@ public static class PingService
     {
         DnsCache.Clear();
         DnsFailures.Clear();
+    }
+
+    /// <summary>
+    /// Проверяет доступность службы удалённого рабочего стола по TCP-порту 3389.
+    /// Ошибки DNS, тайм-ауты и закрытый порт считаются недоступностью и не прерывают мониторинг.
+    /// </summary>
+    public static async Task<bool> CheckRdpPortAsync(string host, int timeoutMs = 700)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+            return false;
+
+        string normalizedHost = host.Trim();
+        int timeout = Math.Clamp(timeoutMs, 100, 5000);
+
+        try
+        {
+            IPAddress[] addresses;
+
+            if (IPAddress.TryParse(normalizedHost, out IPAddress? literal))
+            {
+                if (!IsValidPingTarget(literal))
+                    return false;
+
+                addresses = new[] { literal };
+            }
+            else
+            {
+                // Используем ту же DNS-валидацию и ограничение ожидания, что и для ping.
+                addresses = await ResolveAsync(normalizedHost, timeout);
+            }
+
+            foreach (IPAddress address in addresses.Take(MaxCandidates))
+            {
+                try
+                {
+                    using var client = new TcpClient(address.AddressFamily);
+                    using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeout));
+                    await client.ConnectAsync(address, RdpPort, cts.Token);
+                    return true;
+                }
+                catch (Exception ex) when (
+                    ex is SocketException or OperationCanceledException or TimeoutException or
+                    ArgumentException or InvalidOperationException or ObjectDisposedException or IOException)
+                {
+                    // Один адрес может быть недоступен, но другой адрес из DNS ещё может работать.
+                }
+            }
+        }
+        catch (Exception ex) when (
+            ex is SocketException or OperationCanceledException or TimeoutException or ArgumentException)
+        {
+            // DNS-ошибка или тайм-аут — RDP недоступен; приложение должно продолжить работу.
+        }
+
+        return false;
     }
 
     /// <param name="deepCheck">
