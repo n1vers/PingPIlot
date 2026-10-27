@@ -1,3 +1,4 @@
+
 name: "CodeQL"
 
 on:
@@ -26,22 +27,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
 
-      - name: Build with .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-          include-prerelease: true
-
       - name: Restore
-        run: dotnet restore /home/runner/work/PingPIlot/PingPIlot/PingPIlot.slnx
+        run: dotnet restore .\PingPIlot.slnx
 
       - name: Build
-        run: dotnet build /home/runner/work/PingPIlot/PingPIlot/PingPIlot.slnx --configuration Release --no-restore
+        run: dotnet build .\PingPIlot.slnx --configuration Release --no-restore
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v3 
