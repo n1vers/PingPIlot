@@ -15,6 +15,10 @@ public class DashboardTile : INotifyPropertyChanged
     // История хранится в памяти: до 3600 проверок (примерно 1 час при интервале 1 секунда).
     private const int MaxHistory = 3600;
 
+    // Лишние записи обрезаются пачкой, а не по одной на каждый пакет:
+    // RemoveRange(0, n) сдвигает весь список, и делать это на каждый ping дорого.
+    private const int HistoryTrimSlack = 256;
+
     private readonly List<PingSample> _history = new();
     private int _sent;
     private int _received;
@@ -23,6 +27,12 @@ public class DashboardTile : INotifyPropertyChanged
     private DateTime? _stateSince;
     private string? _resolvedIp;
     private int _consecutiveTimeouts;
+    private int _activePingCycles;
+
+    // Версия данных нужна, чтобы не пересчитывать среднее по нескольку раз за одно обновление.
+    private int _version;
+    private int _averageVersion = -1;
+    private double? _averageCache;
 
     public DashboardTile(SavedComputer computer) => Computer = computer;
 
@@ -52,8 +62,18 @@ public class DashboardTile : INotifyPropertyChanged
     }
     public string IpAddressLabel => $"IP: {IpAddressText}";
 
-    // Не даём накладываться пингам на одну плитку.
-    public bool Busy { get; set; }
+    // Ручная проверка ждёт завершения всех активных автоматических циклов.
+    // Автоматические циклы могут пересекаться, если прошлый пакет ещё ждёт тайм-аут:
+    // это не должно сдвигать расписание отправки следующих пакетов.
+    public bool Busy => Volatile.Read(ref _activePingCycles) > 0;
+
+    public void BeginPingCycle() => Interlocked.Increment(ref _activePingCycles);
+
+    public void EndPingCycle()
+    {
+        if (Interlocked.Decrement(ref _activePingCycles) < 0)
+            Interlocked.Exchange(ref _activePingCycles, 0);
+    }
 
     public bool? IsOnline { get; private set; }
     public long? LatencyMs { get; private set; }
@@ -76,8 +96,20 @@ public class DashboardTile : INotifyPropertyChanged
 
     public Brush StatusBrush { get; private set; } = PingPalette.Neutral;
 
-    /// <summary>Среднее значение за интервал из настроек; null при неудачной последней проверке.</summary>
-    public double? AverageLatencyMs => PingStats.CurrentAverage(_history);
+    /// <summary>Скользящее среднее значение за окно из настроек.</summary>
+    public double? AverageLatencyMs
+    {
+        get
+        {
+            if (_averageVersion != _version)
+            {
+                _averageCache = PingStats.CurrentAverage(_history);
+                _averageVersion = _version;
+            }
+
+            return _averageCache;
+        }
+    }
 
     public string AveragePeriodLabel => $"СРЕДНИЙ ПИНГ ({PingStats.AverageIntervalSeconds} с)";
 
@@ -90,21 +122,21 @@ public class DashboardTile : INotifyPropertyChanged
     public async Task<bool> UpdateRdpAvailabilityAsync()
     {
         bool available = await PingService.CheckRdpPortAsync(Host, timeoutMs: 700);
+        SetRdpAvailability(available);
+        return available;
+    }
+
+    public void SetRdpAvailability(bool available)
+    {
         if (RdpAvailable != available)
         {
             RdpAvailable = available;
             Refresh();
         }
-        else if (IsOnline == true)
-        {
-            Refresh();
-        }
-
-        return available;
     }
 
-    /// <summary>Группа цвета: 0 — зелёный, 1 — жёлтый, 2 — красный, 3 — серый (нет пинга).</summary>
-    public int ColorRank => LatencyMs switch
+    /// <summary>Группа цвета по среднему ping: 0 — зелёный, 1 — жёлтый, 2 — красный, 3 — серый.</summary>
+    public int ColorRank => IsOnline != true ? 3 : AverageLatencyMs switch
     {
         null => 3,
         <= PingPalette.GoodMaxMs => 0,
@@ -135,18 +167,31 @@ public class DashboardTile : INotifyPropertyChanged
     {
         get
         {
-            long[] values = _history
-                .Where(s => s.LatencyMs.HasValue)
-                .Select(s => s.LatencyMs!.Value)
-                .ToArray();
+            long min = long.MaxValue, max = long.MinValue, sum = 0;
+            int count = 0;
 
-            return values.Length == 0
+            // Обычный цикл без LINQ: свойство вызывается при каждом обновлении плитки.
+            for (int i = 0; i < _history.Count; i++)
+            {
+                if (_history[i].LatencyMs is not long ms)
+                    continue;
+
+                if (ms < min) min = ms;
+                if (ms > max) max = ms;
+                sum += ms;
+                count++;
+            }
+
+            return count == 0
                 ? "—"
-                : $"{values.Min()} / {values.Average():F0} / {values.Max()} ms";
+                : $"{min} / {(double)sum / count:F0} / {max} ms";
         }
     }
 
-    public string HistoryText => $"{_history.Count} проверок с запуска";
+    public string HistoryText => $"{_history.Count} проверок с запуска или сброса";
+
+    /// <summary>Сколько проверок лежит в истории (без копирования самой истории).</summary>
+    public int HistoryCount => _history.Count;
 
     public string VisualizationMode { get; private set; } = "Graph";
     public int MiniHistorySeconds { get; private set; } = 60;
@@ -189,12 +234,35 @@ public class DashboardTile : INotifyPropertyChanged
     public PingSample[] GetMiniHistory()
     {
         DateTime cutoff = DateTime.Now - TimeSpan.FromSeconds(MiniHistorySeconds);
-        return _history.Where(sample => sample.Time >= cutoff).ToArray();
+
+        // История отсортирована по времени, поэтому начало нужного окна ищем
+        // бинарным поиском, а не просматриваем весь список с LINQ.
+        int lo = 0, hi = _history.Count;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >> 1;
+            if (_history[mid].Time < cutoff)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+
+        int count = _history.Count - lo;
+        if (count <= 0)
+            return Array.Empty<PingSample>();
+
+        var result = new PingSample[count];
+        _history.CopyTo(lo, result, 0, count);
+        return result;
     }
 
-    public void Apply(PingResult result)
+    /// <param name="notify">
+    /// false — не уведомлять интерфейс: так вызывает пакетная обработка, которая после
+    /// всех результатов вызывает <see cref="Refresh"/> один раз на плитку.
+    /// </param>
+    public void Apply(PingResult result, DateTime? completedAt = null, bool notify = true)
     {
-        DateTime now = DateTime.Now;
+        DateTime now = completedAt ?? DateTime.Now;
         bool? previous = IsOnline;
 
         _sent++;
@@ -213,8 +281,6 @@ public class DashboardTile : INotifyPropertyChanged
             StatusText = "Online";
             LatencyText = result.LatencyMs.HasValue ? $"{result.LatencyMs.Value} ms" : "—";
 
-            // Цвет зависит от пинга: до 15 мс — зелёный, до 50 мс — жёлтый, выше — красный.
-            StatusBrush = PingPalette.For(result.LatencyMs);
         }
         else
         {
@@ -241,10 +307,14 @@ public class DashboardTile : INotifyPropertyChanged
             _stateSince = now;
 
         _history.Add(new PingSample(now, result.Ok ? result.LatencyMs : null, result.Status));
-        if (_history.Count > MaxHistory)
+        if (_history.Count > MaxHistory + HistoryTrimSlack)
             _history.RemoveRange(0, _history.Count - MaxHistory);
 
-        Refresh();
+        _version++;
+        UpdateStatusBrushFromAverage();
+
+        if (notify)
+            Refresh();
     }
 
     /// <summary>
@@ -287,7 +357,6 @@ public class DashboardTile : INotifyPropertyChanged
                 LatencyMs = sample.LatencyMs;
                 StatusText = "Online";
                 LatencyText = sample.LatencyMs.HasValue ? $"{sample.LatencyMs.Value} ms" : "—";
-                StatusBrush = PingPalette.For(sample.LatencyMs);
             }
             else
             {
@@ -303,6 +372,31 @@ public class DashboardTile : INotifyPropertyChanged
             previous = IsOnline;
         }
 
+        _version++;
+        UpdateStatusBrushFromAverage();
+        Refresh();
+    }
+
+    /// <summary>
+    /// Кнопка «Сбросить статистику»: обнуляет историю, счётчики проверок и потери.
+    /// В отличие от <see cref="ResetHistory"/> не трогает найденный IP и доступность RDP,
+    /// чтобы плитка не мигала «не определён» до следующей проверки.
+    /// </summary>
+    public void ResetStatistics()
+    {
+        _history.Clear();
+        _sent = 0;
+        _received = 0;
+        _consecutiveTimeouts = 0;
+        _lastChecked = null;
+        _lastOnline = null;
+        _stateSince = null;
+        IsOnline = null;
+        LatencyMs = null;
+        StatusText = "Not checked";
+        LatencyText = "";
+        StatusBrush = PingPalette.Neutral;
+        _version++;
         Refresh();
     }
 
@@ -321,7 +415,24 @@ public class DashboardTile : INotifyPropertyChanged
         StatusText = "Not checked";
         LatencyText = "";
         StatusBrush = PingPalette.Neutral;
+        _consecutiveTimeouts = 0;
+        _version++;
         Refresh();
+    }
+
+    /// <summary>Пересчитывает цвет плитки после изменения окна усреднения.</summary>
+    public void RefreshAverageColor()
+    {
+        _version++;   // окно усреднения могло измениться — кэш среднего устарел
+        UpdateStatusBrushFromAverage();
+        Refresh();
+    }
+
+    private void UpdateStatusBrushFromAverage()
+    {
+        StatusBrush = IsOnline == true && AverageLatencyMs is double average
+            ? PingPalette.For((long)Math.Round(average))
+            : PingPalette.Neutral;
     }
 
     /// <summary>Сообщает интерфейсу, что любые свойства могли измениться.</summary>

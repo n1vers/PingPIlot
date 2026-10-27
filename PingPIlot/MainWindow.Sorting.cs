@@ -100,13 +100,13 @@ public partial class MainWindow
             // Зелёные, жёлтые, красные, серые.
             SortMode.ColorGoodFirst => tiles
                 .OrderBy(t => t.ColorRank)
-                .ThenBy(t => t.LatencyMs ?? long.MaxValue)
+                .ThenBy(t => t.AverageLatencyMs ?? double.MaxValue)
                 .ThenBy(Added),
 
             // Серые, красные, жёлтые, зелёные: проблемные устройства сверху.
             SortMode.ColorProblemFirst => tiles
                 .OrderByDescending(t => t.ColorRank)
-                .ThenByDescending(t => t.LatencyMs ?? 0)
+                .ThenByDescending(t => t.AverageLatencyMs ?? 0)
                 .ThenBy(Added),
 
             SortMode.Name => tiles

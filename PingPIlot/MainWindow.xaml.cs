@@ -31,6 +31,23 @@ public partial class MainWindow : Window
     private readonly SessionStoreService _sessionStore = new();
     private readonly ObservableCollection<MonitoringSession> _savedSessions = new();
     private readonly ObservableCollection<SessionLogEntry> _liveSessionEntries = new();
+    private readonly ConcurrentQueue<(DashboardTile Tile, PingResult Result, DateTime CompletedAt, int Epoch)> _pendingPingResults = new();
+    private readonly ConcurrentQueue<SessionLogEntry> _pendingLiveSessionEntries = new();
+
+    // Номер «поколения» статистики. Кнопка «Сбросить статистику» увеличивает его, и ответы
+    // пакетов, отправленных до сброса, отбрасываются, а не попадают в новую статистику.
+    private int _statsEpoch;
+
+    // Журнал сессии пишется одной цепочкой фоновых задач: порядок записей сохраняется,
+    // а на каждые 100 мс не запускается новая параллельная задача.
+    private Task _sessionWriteTask = Task.CompletedTask;
+    private int _pendingLiveCount;
+
+    // Порядок плиток по пингу/цвету пересчитывается не чаще раза в несколько секунд:
+    // иначе плитки (с графиками внутри) переставляются и перерисовываются каждую секунду.
+    private DateTime _lastSortUtc = DateTime.MinValue;
+    private static readonly TimeSpan SortThrottle = TimeSpan.FromSeconds(3);
+    private readonly ConcurrentDictionary<Guid, DateTime> _lastRdpChecks = new();
     private ICollectionView? _liveSessionView;
     private readonly ObservableCollection<DashboardTile> _sessionTiles = new();
     private readonly MonitoringSession _currentSession;
@@ -40,11 +57,13 @@ public partial class MainWindow : Window
     private bool _loadingGroups;
     private bool _refreshInProgress;
     private bool _allowClose;
-    private bool _sessionWriteErrorShown;
+    private int _sessionWriteErrorShown;
     private Forms.NotifyIcon? _trayIcon;
     private const int MaxLiveSessionRows = 3000;
+    private const int MaxLiveSessionEntriesPerFlush = 100;
     private const int PingTimeoutMs = 800;
     private const int ForcedPingTimeoutMs = 3000;
+    private static readonly TimeSpan RdpCheckInterval = TimeSpan.FromSeconds(5);
     private bool _manualCheckRunning;
 
     private ComputerGroup? CurrentGroup => GroupTabs.SelectedItem as ComputerGroup;
@@ -55,6 +74,8 @@ public partial class MainWindow : Window
 
     // Масштаб сохраняется не на каждое деление колеса, а когда пользователь закончил крутить.
     private readonly DispatcherTimer _scaleSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(600) };
+    private readonly DispatcherTimer _pingResultUpdateTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
+    private readonly DispatcherTimer _liveSessionUpdateTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
 
     public MainWindow()
     {
@@ -65,6 +86,10 @@ public partial class MainWindow : Window
             _scaleSaveTimer.Stop();
             SaveData();
         };
+        _pingResultUpdateTimer.Tick += (_, _) => FlushPingResults();
+        _pingResultUpdateTimer.Start();
+        _liveSessionUpdateTimer.Tick += (_, _) => FlushLiveSessionEntries();
+        _liveSessionUpdateTimer.Start();
 
         _currentSession = _sessionStore.StartSession();
         SessionsGrid.ItemsSource = _savedSessions;
@@ -103,6 +128,9 @@ public partial class MainWindow : Window
         {
             _timer.Stop();
             _autoScanTimer.Stop();
+            _pingResultUpdateTimer.Stop();
+            _liveSessionUpdateTimer.Stop();
+            FlushLiveSessionEntries();
             if (_scaleSaveTimer.IsEnabled)
             {
                 _scaleSaveTimer.Stop();
@@ -248,11 +276,11 @@ public partial class MainWindow : Window
         foreach (DashboardTile tile in _tileCache.Values)
         {
             tile.SetMiniHistorySeconds(miniHistorySeconds);
-            tile.Refresh();
+            tile.RefreshAverageColor();
         }
         _timer.Interval = TimeSpan.FromMilliseconds(interval);
         SaveData();
-        SettingsStatusText.Text = $"Параметры применены: ping каждые {interval} мс, пакетов: {packets}, mini-история: {miniHistorySeconds} с, среднее: {averageIntervalSeconds} с.";
+        SettingsStatusText.Text = $"Параметры применены: ping каждые {interval} мс, пакетов за интервал: {packets}, mini-история: {miniHistorySeconds} с, среднее: {averageIntervalSeconds} с.";
         _ = RefreshTilesAsync();
     }
 
@@ -528,16 +556,15 @@ public partial class MainWindow : Window
                 .ToArray();
 
             // Каждая плитка проверяется сама по себе: медленный или выключенный компьютер
-            // не задерживает остальные, и текущий пинг обновляется с интервалом из настроек.
-            // Плитку, которая ещё проверяется, пропускаем.
+            // не задерживает остальные, а пакеты внутри одного интервала распределяются равномерно.
+            // Запоздавшие ответы старого цикла не сдвигают запуск следующего.
             Task[] running = allTiles
-                .Where(tile => !tile.Busy)
-                .Select(tile => PingTileAsync(tile))
+                .Select(tile => PingTileAsync(tile, allowOverlap: true))
                 .ToArray();
 
             // Ждём быстрые ответы (не дольше 300 мс), остальные доработают в фоне.
             await Task.WhenAny(Task.WhenAll(running), Task.Delay(300));
-            ApplySort();
+            ApplySortThrottled();
             UpdateSummary();
         }
         catch (Exception ex)
@@ -568,7 +595,7 @@ public partial class MainWindow : Window
 
     // Обычная проверка по таймеру или полная (force) — «Проверить все» и «Проверить сейчас»:
     // DNS спрашивается заново, на каждый адрес до двух попыток и тайм-аут как у ping.exe.
-    private async Task PingTileAsync(DashboardTile tile, bool force = false)
+    private async Task PingTileAsync(DashboardTile tile, bool force = false, bool allowOverlap = false)
     {
         // Ручная проверка не пропускается, если плитка занята автоматической, а ждёт её конца.
         if (force)
@@ -577,36 +604,170 @@ public partial class MainWindow : Window
                 await Task.Delay(100);
         }
 
-        await _pingSemaphore.WaitAsync();
+        if (tile.Busy && !allowOverlap)
+            return;
+
+        tile.BeginPingCycle();
         try
         {
-            if (tile.Busy)
-                return;
+            int packets = force ? 1 : Math.Clamp(_data.UserSettings?.PacketsPerCycle ?? 1, 1, 20);
+            int timeoutMs = force ? ForcedPingTimeoutMs : PingTimeoutMs;
+            int cycleIntervalMs = force
+                ? 0
+                : Math.Clamp(_data.UserSettings?.PingIntervalMilliseconds ?? 1000, 100, 60000);
+            // Пакеты запускаются по расписанию относительно начала цикла. Ожидание
+            // ответа одного пакета не задерживает следующий: например, 10 пакетов
+            // за 1 с стартуют на 0, 100, …, 900 мс даже при тайм-аутах.
+            Task[] scheduledPings = Enumerable.Range(0, packets)
+                .Select(i => PingTilePacketAsync(
+                    tile,
+                    timeoutMs,
+                    force,
+                    TimeSpan.FromMilliseconds((double)cycleIntervalMs * i / packets)))
+                .ToArray();
 
-            tile.Busy = true;
-            try
+            if (force)
             {
-                int packets = force ? 1 : Math.Clamp(_data.UserSettings?.PacketsPerCycle ?? 1, 1, 20);
-                int timeoutMs = force ? ForcedPingTimeoutMs : PingTimeoutMs;
-
-                for (int i = 0; i < packets; i++)
-                {
-                    PingResult result = await PingService.PingAsync(tile.PingTarget, timeoutMs, deepCheck: force);
-                    tile.Apply(result);
-                    RecordPingResult(tile, result);
-                }
-
-                if (tile.IsOnline == true)
-                    await tile.UpdateRdpAvailabilityAsync();
+                await Task.WhenAll(scheduledPings).ConfigureAwait(false);
+                await UpdateRdpAvailabilityAsync(tile).ConfigureAwait(false);
             }
-            finally
+            else
             {
-                tile.Busy = false;
+                // Не ждём медленные ответы: иначе тайм-аут последнего пакета заставит
+                // пропустить следующий цикл. Результаты всё равно попадут в плитку,
+                // когда придут, а следующий набор стартует ровно через интервал.
+                _ = CompleteAutomaticPingCycleAsync(tile, scheduledPings);
+                await Task.Delay(TimeSpan.FromMilliseconds(cycleIntervalMs)).ConfigureAwait(false);
             }
         }
         finally
         {
+            await Dispatcher.InvokeAsync(tile.EndPingCycle).Task.ConfigureAwait(false);
+        }
+    }
+
+    private async Task PingTilePacketAsync(
+        DashboardTile tile,
+        int timeoutMs,
+        bool deepCheck,
+        TimeSpan scheduledOffset)
+    {
+        // Поколение статистики запоминаем в момент постановки пакета в расписание.
+        int epoch = Volatile.Read(ref _statsEpoch);
+
+        if (scheduledOffset > TimeSpan.Zero)
+            await Task.Delay(scheduledOffset).ConfigureAwait(false);
+
+        // PingService не захватывает UI-контекст. Результат забирает общий UI-батч
+        // раз в 100 мс, поэтому десятки ответов не создают очередь Dispatcher.
+        await _pingSemaphore.WaitAsync().ConfigureAwait(false);
+        PingResult result;
+        try
+        {
+            // PingAsync уже асинхронный и не блокирует поток, отдельный Task.Run не нужен.
+            result = await PingService.PingAsync(tile.PingTarget, timeoutMs, deepCheck)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
             _pingSemaphore.Release();
+        }
+
+        _pendingPingResults.Enqueue((tile, result, DateTime.Now, epoch));
+    }
+
+    private void FlushPingResults()
+    {
+        if (_pendingPingResults.IsEmpty)
+            return;
+
+        int epoch = Volatile.Read(ref _statsEpoch);
+        List<SessionLogEntry>? entries = null;
+        List<DashboardTile>? touched = null;
+
+        while (_pendingPingResults.TryDequeue(out var pending))
+        {
+            // Ответ на пакет, отправленный до сброса статистики, в новую статистику не попадает.
+            if (pending.Epoch != epoch)
+                continue;
+
+            // Плитка не уведомляет интерфейс на каждый пакет: за 100 мс их приходит
+            // до десятка, а перерисовка нужна одна — после всей пачки.
+            pending.Tile.Apply(pending.Result, pending.CompletedAt, notify: false);
+
+            touched ??= new List<DashboardTile>();
+            if (!touched.Contains(pending.Tile))
+                touched.Add(pending.Tile);
+
+            entries ??= new List<SessionLogEntry>();
+            entries.Add(CreateSessionLogEntry(pending.Tile, pending.Result, pending.CompletedAt));
+        }
+
+        if (touched != null)
+        {
+            foreach (DashboardTile tile in touched)
+                tile.Refresh();
+        }
+
+        if (entries != null)
+            QueueSessionWrite(entries);
+    }
+
+    private void QueueSessionWrite(List<SessionLogEntry> entries)
+    {
+        // Вызывается только из UI-потока, поэтому цепочку можно наращивать без блокировок.
+        _sessionWriteTask = _sessionWriteTask.ContinueWith(
+            _ =>
+            {
+                foreach (SessionLogEntry entry in entries)
+                    RecordPingResult(entry);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+    }
+
+    private async Task CompleteAutomaticPingCycleAsync(DashboardTile tile, Task[] scheduledPings)
+    {
+        try
+        {
+            await Task.WhenAll(scheduledPings).ConfigureAwait(false);
+            await UpdateRdpAvailabilityAsync(tile).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Automatic ping cycle failed: {ex}");
+        }
+    }
+
+    private async Task UpdateRdpAvailabilityAsync(DashboardTile tile)
+    {
+        bool isOnline = await Dispatcher.InvokeAsync(() => tile.IsOnline == true).Task.ConfigureAwait(false);
+        if (!isOnline || !TryStartRdpCheck(tile.Computer.Id))
+            return;
+
+        bool rdpAvailable = await Task.Run(() => PingService.CheckRdpPortAsync(tile.Host, timeoutMs: 700))
+            .ConfigureAwait(false);
+        await Dispatcher.InvokeAsync(() => tile.SetRdpAvailability(rdpAvailable)).Task.ConfigureAwait(false);
+    }
+
+    private bool TryStartRdpCheck(Guid computerId)
+    {
+        DateTime now = DateTime.UtcNow;
+        while (true)
+        {
+            if (!_lastRdpChecks.TryGetValue(computerId, out DateTime previous))
+            {
+                if (_lastRdpChecks.TryAdd(computerId, now))
+                    return true;
+                continue;
+            }
+
+            if (now - previous < RdpCheckInterval)
+                return false;
+
+            if (_lastRdpChecks.TryUpdate(computerId, now, previous))
+                return true;
         }
     }
 
@@ -632,6 +793,88 @@ public partial class MainWindow : Window
         {
             ShowError("Не удалось открыть клиент RDP.", ex);
         }
+    }
+
+    // ---------- Сброс статистики ----------
+
+    private async void ResetStatsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!Confirm(
+                "Сбросить всю статистику и начать заново?\n\n" +
+                "Будут очищены графики, счётчики проверок и потерь у всех компьютеров (во всех группах) " +
+                "и журнал текущей сессии. Ранее сохранённые сессии останутся как есть."))
+        {
+            return;
+        }
+
+        ResetStatsButton.IsEnabled = false;
+        // Пока идёт сброс, результаты в плитки не попадают.
+        _pingResultUpdateTimer.Stop();
+        _liveSessionUpdateTimer.Stop();
+
+        try
+        {
+            // 1. Всё, что отправлено или принято до этого момента, в новую статистику не войдёт.
+            Interlocked.Increment(ref _statsEpoch);
+            while (_pendingPingResults.TryDequeue(out _))
+            {
+            }
+
+            // 2. Дописываем уже принятые записи, чтобы потом они не попали в очищенный журнал.
+            try
+            {
+                await _sessionWriteTask;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Session writer failed before reset: {ex}");
+            }
+
+            // 3. Журнал текущей сессии начинается заново.
+            _sessionStore.ResetActiveSession(_currentSession);
+            while (_pendingLiveSessionEntries.TryDequeue(out _))
+            {
+            }
+
+            Interlocked.Exchange(ref _pendingLiveCount, 0);
+            _liveSessionEntries.Clear();
+            Interlocked.Exchange(ref _sessionWriteErrorShown, 0);
+
+            // 4. Плитки: история, счётчики, потери, графики.
+            foreach (DashboardTile tile in _tileCache.Values)
+                tile.ResetStatistics();
+
+            _lastSortUtc = DateTime.MinValue;
+            ApplySortThrottled();
+            UpdateSummary();
+            UpdateCurrentSessionHeader();
+            if (_observedSessionGraphTile != null)
+                UpdateSelectedSessionComputerHeader(_observedSessionGraphTile);
+
+            SummaryText.Text = $"Статистика сброшена в {DateTime.Now:HH:mm:ss}. Подсчёт начат заново.";
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось полностью сбросить статистику.", ex);
+        }
+        finally
+        {
+            _pingResultUpdateTimer.Start();
+            _liveSessionUpdateTimer.Start();
+            ResetStatsButton.IsEnabled = true;
+        }
+    }
+
+    private void ApplySortThrottled()
+    {
+        // По имени и порядку добавления плитки не двигаются, а по пингу и цвету
+        // порядок зависит от свежих данных и пересчитывается не чаще раза в SortThrottle.
+        DateTime now = DateTime.UtcNow;
+        if (now - _lastSortUtc < SortThrottle)
+            return;
+
+        _lastSortUtc = now;
+        ApplySort();
     }
 
     // ---------- Добавление и управление ----------
@@ -969,7 +1212,7 @@ public partial class MainWindow : Window
 
     // ---------- Сессии мониторинга ----------
 
-    private void RecordPingResult(DashboardTile tile, PingResult result)
+    private SessionLogEntry CreateSessionLogEntry(DashboardTile tile, PingResult result, DateTime timestamp)
     {
         string ipAddress = result.ResolvedIp;
         if (string.IsNullOrWhiteSpace(ipAddress) &&
@@ -978,9 +1221,9 @@ public partial class MainWindow : Window
             ipAddress = tile.IpAddressText;
         }
 
-        var entry = new SessionLogEntry
+        return new SessionLogEntry
         {
-            Timestamp = DateTime.Now,
+            Timestamp = timestamp,
             ComputerId = tile.Computer.Id,
             GroupId = tile.Computer.GroupId,
             GroupName = _data.Groups.FirstOrDefault(g => g.Id == tile.Computer.GroupId)?.Name ?? "",
@@ -991,6 +1234,10 @@ public partial class MainWindow : Window
             LatencyMs = result.Ok ? result.LatencyMs : null,
             Success = result.Ok
         };
+    }
+
+    private void RecordPingResult(SessionLogEntry entry)
+    {
 
         try
         {
@@ -1000,27 +1247,45 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            if (!_sessionWriteErrorShown)
+            if (Interlocked.Exchange(ref _sessionWriteErrorShown, 1) == 0)
             {
-                _sessionWriteErrorShown = true;
                 Dispatcher.BeginInvoke(new Action(() => ShowError(
                     "Не удалось записать журнал текущей сессии. Новые записи могут не сохраниться.", ex)));
             }
         }
 
-        if (Dispatcher.CheckAccess())
-            AddLiveSessionEntry(entry);
-        else
-            Dispatcher.BeginInvoke(new Action(() => AddLiveSessionEntry(entry)));
+        _pendingLiveSessionEntries.Enqueue(entry);
+        Interlocked.Increment(ref _pendingLiveCount);
+        // Полный журнал уже записан на диск; в памяти для таблицы держим только
+        // последние записи, чтобы мониторинг не накапливал очередь во время работы
+        // на вкладке дашборда. Размер считаем счётчиком: ConcurrentQueue.Count дорогой.
+        while (Volatile.Read(ref _pendingLiveCount) > MaxLiveSessionRows &&
+               _pendingLiveSessionEntries.TryDequeue(out _))
+        {
+            Interlocked.Decrement(ref _pendingLiveCount);
+        }
     }
 
-    private void AddLiveSessionEntry(SessionLogEntry entry)
+    private void FlushLiveSessionEntries()
     {
-        _liveSessionEntries.Insert(0, entry);
+        // Пока вкладка сессий не открыта, журнал уже надёжно пишется на диск,
+        // поэтому не создаём десятки уведомлений DataGrid на дашборде.
+        if (!SessionsTab.IsSelected)
+            return;
+
+        int added = 0;
+        while (added < MaxLiveSessionEntriesPerFlush &&
+               _pendingLiveSessionEntries.TryDequeue(out SessionLogEntry? entry))
+        {
+            Interlocked.Decrement(ref _pendingLiveCount);
+            _liveSessionEntries.Insert(0, entry);
+            added++;
+        }
+
         while (_liveSessionEntries.Count > MaxLiveSessionRows)
             _liveSessionEntries.RemoveAt(_liveSessionEntries.Count - 1);
 
-        if (_showingCurrentSessionView)
+        if (added > 0 && _showingCurrentSessionView)
             UpdateCurrentSessionHeader();
     }
 
@@ -1030,12 +1295,10 @@ public partial class MainWindow : Window
     private void UpdateCurrentSessionHeader()
     {
         string groupName = CurrentGroup?.Name ?? "не выбрана";
-        int visibleEntries = CurrentGroup == null
-            ? 0
-            : _liveSessionEntries.Count(entry => entry.GroupId == CurrentGroup.Id);
         SessionLogEntry[] entries = CurrentGroup == null
             ? Array.Empty<SessionLogEntry>()
             : _liveSessionEntries.Where(entry => entry.GroupId == CurrentGroup.Id).ToArray();
+        int visibleEntries = entries.Length;
         string stats = FormatSessionStats(entries);
 
         SessionViewHeaderText.Text =
@@ -1093,7 +1356,11 @@ public partial class MainWindow : Window
 
     private void SessionGraphTile_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        SessionGraph.InvalidateVisual();
+        // График сам подписан на плитку и перерисовывается с ограничением частоты, а подпись
+        // нужна только пока открыта вкладка «Сессии». Раньше она собиралась на каждый пакет.
+        if (!SessionsTab.IsSelected)
+            return;
+
         UpdateSelectedSessionComputerHeader(_observedSessionGraphTile);
     }
 
@@ -1107,7 +1374,7 @@ public partial class MainWindow : Window
 
         SessionSelectedComputerText.Text =
             $"{tile.Name} · {tile.IpAddressText} · {tile.StatusText} · {tile.LatencyText} · {tile.PacketLossText} · " +
-            $"Проверок: {tile.SentReceivedText} · История: {tile.GetHistory().Length}";
+            $"Проверок: {tile.SentReceivedText} · История: {tile.HistoryCount}";
     }
 
     private void BuildSessionMatrix(MonitoringSession session, IReadOnlyList<SessionLogEntry> entries)
@@ -1264,6 +1531,16 @@ public partial class MainWindow : Window
     {
         if (_allowClose)
             return;
+
+        // Дожидаемся, пока фоновая запись допишет уже принятые результаты в журнал.
+        try
+        {
+            _sessionWriteTask.Wait(TimeSpan.FromSeconds(3));
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Session writer failed: {ex}");
+        }
 
         if (_currentSession.EntryCount == 0)
         {

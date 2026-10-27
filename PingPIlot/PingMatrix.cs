@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using PingPilot.Models;
 using Brush = System.Windows.Media.Brush;
 using Brushes = System.Windows.Media.Brushes;
@@ -46,11 +47,26 @@ public class PingMatrix : FrameworkElement
     private int _rows;
     private int _offset;
     private bool _isAttached;
+    private readonly DispatcherTimer _renderTimer;
 
     public PingMatrix()
     {
+        _renderTimer = new DispatcherTimer(DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(200)
+        };
+        _renderTimer.Tick += (_, _) =>
+        {
+            _renderTimer.Stop();
+            if (IsVisible)
+                InvalidateVisual();
+        };
         Loaded += (_, _) => Attach();
-        Unloaded += (_, _) => Detach();
+        Unloaded += (_, _) =>
+        {
+            _renderTimer.Stop();
+            Detach();
+        };
     }
 
     public DashboardTile? Tile
@@ -100,10 +116,21 @@ public class PingMatrix : FrameworkElement
 
     private void Tile_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // Матрица может быть создана рядом с графиком, но скрыта переключателем.
+        // Не создаём очередь перерисовок, пока её не видно.
+        if (!IsVisible)
+            return;
+
         if (Dispatcher.CheckAccess())
-            InvalidateVisual();
+            ScheduleRender();
         else
-            Dispatcher.BeginInvoke(InvalidateVisual);
+            Dispatcher.BeginInvoke(ScheduleRender);
+    }
+
+    private void ScheduleRender()
+    {
+        if (!_renderTimer.IsEnabled)
+            _renderTimer.Start();
     }
 
     protected override void OnRender(DrawingContext dc)

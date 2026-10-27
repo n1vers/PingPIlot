@@ -101,6 +101,35 @@ public sealed class SessionStoreService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Restarts the active session from zero: the pending log is truncated and all counters
+    /// are cleared. Saved (permanent) sessions are not touched.
+    /// </summary>
+    public void ResetActiveSession(MonitoringSession session)
+    {
+        lock (_sync)
+        {
+            EnsureActiveSession(session);
+
+            _activeWriter?.Dispose();
+            _activeWriter = new StreamWriter(
+                new FileStream(_activeLogPath!, FileMode.Create, FileAccess.Write, FileShare.Read),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
+            {
+                AutoFlush = false
+            };
+
+            _writesSinceFlush = 0;
+            _computerIds.Clear();
+            _entryCountsByGroup.Clear();
+            _computerIdsByGroup.Clear();
+
+            session.EntryCount = 0;
+            session.ComputerCount = 0;
+            session.StartedAt = DateTime.Now;
+        }
+    }
+
     /// <summary>Returns an exact count for the selected group from the active log.</summary>
     public (long EntryCount, int ComputerCount) GetActiveSummary(Guid groupId)
     {

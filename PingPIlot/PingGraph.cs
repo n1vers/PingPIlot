@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using PingPilot.Models;
 using Brush = System.Windows.Media.Brush;
 using Brushes = System.Windows.Media.Brushes;
@@ -42,11 +43,29 @@ public class PingGraph : FrameworkElement
     private double?[] _averages = Array.Empty<double?>();
     private Rect _plot;
     private bool _isAttached;
+    private readonly DispatcherTimer _renderTimer;
 
     public PingGraph()
     {
+        // Отдельные ответы могут приходить десятки раз в секунду. История хранится
+        // полностью, а график обновляем 5 раз в секунду: для линии, которая медленно
+        // «едет» влево, этого достаточно, а семь графиков не забивают UI-поток.
+        _renderTimer = new DispatcherTimer(DispatcherPriority.Render)
+        {
+            Interval = TimeSpan.FromMilliseconds(200)
+        };
+        _renderTimer.Tick += (_, _) =>
+        {
+            _renderTimer.Stop();
+            if (IsVisible)
+                InvalidateVisual();
+        };
         Loaded += (_, _) => Attach();
-        Unloaded += (_, _) => Detach();
+        Unloaded += (_, _) =>
+        {
+            _renderTimer.Stop();
+            Detach();
+        };
     }
 
     public DashboardTile? Tile
@@ -96,10 +115,21 @@ public class PingGraph : FrameworkElement
 
     private void Tile_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // Скрытые графики (вкладки и переключённая матрица) не должны получать
+        // отдельную перерисовку на каждый пакет.
+        if (!IsVisible)
+            return;
+
         if (Dispatcher.CheckAccess())
-            InvalidateVisual();
+            ScheduleRender();
         else
-            Dispatcher.BeginInvoke(InvalidateVisual);
+            Dispatcher.BeginInvoke(ScheduleRender);
+    }
+
+    private void ScheduleRender()
+    {
+        if (!_renderTimer.IsEnabled)
+            _renderTimer.Start();
     }
 
     protected override void OnRender(DrawingContext dc)
@@ -121,8 +151,10 @@ public class PingGraph : FrameworkElement
         }
         else
         {
-            _samples = PingStats.ToBuckets(_samples, DateTime.Now);
-            _averages = _samples.Select(s => (double?)s.LatencyMs).ToArray();
+            _samples = PingStats.ToBuckets(_samples);
+            _averages = new double?[_samples.Length];
+            for (int k = 0; k < _samples.Length; k++)
+                _averages[k] = _samples[k].LatencyMs;
         }
         // Цвета берём из текущей темы, чтобы график читался и на светлом, и на тёмном фоне.
         Brush axisBrush = ThemeBrush("MutedBrush", AxisBrush);
@@ -158,17 +190,24 @@ public class PingGraph : FrameworkElement
         bool showCurrent = PingDisplay.ShowCurrent;
 
         // Если текущий пинг скрыт, шкала подбирается по среднему.
-        double maxLatency = showCurrent
-            ? _samples
-                .Where(s => s.LatencyMs.HasValue)
-                .Select(s => (double)s.LatencyMs!.Value)
-                .DefaultIfEmpty(0)
-                .Max()
-            : _averages
-                .Where(a => a.HasValue)
-                .Select(a => a!.Value)
-                .DefaultIfEmpty(0)
-                .Max();
+        // Обычный цикл вместо цепочки LINQ: график перерисовывается много раз в секунду.
+        double maxLatency = 0;
+        if (showCurrent)
+        {
+            for (int k = 0; k < _samples.Length; k++)
+            {
+                if (_samples[k].LatencyMs is long ms && ms > maxLatency)
+                    maxLatency = ms;
+            }
+        }
+        else
+        {
+            for (int k = 0; k < _averages.Length; k++)
+            {
+                if (_averages[k] is double a && a > maxLatency)
+                    maxLatency = a;
+            }
+        }
 
         // Шкала всегда показывает пороги 15 и 50 мс.
         double yMax = Math.Max(60, Math.Ceiling(maxLatency * 1.15 / 10) * 10);
@@ -236,10 +275,11 @@ public class PingGraph : FrameworkElement
             if (_averages[i] is not double avg)
                 continue;
 
-            // Не рисуем маркер для каждой проверки внутри одного интервала: десятки
-            // окружностей поверх одной линии создавали эффект повторной прорисовки.
+            // В режиме только среднего одна точка соответствует окну усреднения.
+            // При показе текущего ping оставляем все свежие точки, чтобы линия не
+            // выглядела ступенчатой.
             long bucket = PingStats.GetBucketId(_samples[i].Time);
-            if (i + 1 < n && PingStats.GetBucketId(_samples[i + 1].Time) == bucket)
+            if (!showCurrent && i + 1 < n && PingStats.GetBucketId(_samples[i + 1].Time) == bucket)
                 continue;
 
             bool isLast = i == n - 1;

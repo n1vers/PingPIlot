@@ -1,8 +1,7 @@
 namespace PingPilot.Models;
 
 /// <summary>
-/// Расчёт среднего ping по фиксированным временным интервалам.
-/// Длительность интервала пользователь задаёт в настройках.
+/// Расчёт скользящего среднего ping за заданное пользователем окно времени.
 /// </summary>
 public static class PingStats
 {
@@ -17,10 +16,9 @@ public static class PingStats
     public static long GetBucketId(DateTime time) => time.Ticks / WindowTicks;
 
     /// <summary>
-    /// Среднее для каждой удачной проверки внутри её временного интервала.
-    /// Все удачные проверки одного интервала получают одно и то же среднее значение,
-    /// поэтому график не соединяет среднее предыдущего интервала с текущим дважды.
-    /// Неудачные проверки остаются null и прерывают линию.
+    /// Скользящее среднее для каждой удачной проверки. Окно заканчивается на
+    /// конкретном пакете, поэтому линия меняется плавно, а не ступенями раз в
+    /// длину интервала. Неудачные проверки остаются null и прерывают линию.
     /// </summary>
     public static double?[] RollingAverage(PingSample[] samples)
     {
@@ -29,26 +27,27 @@ public static class PingStats
             return result;
 
         long windowTicks = WindowTicks;
-        var totals = new Dictionary<long, (long Sum, int Count)>();
-
-        foreach (PingSample sample in samples)
-        {
-            if (sample.LatencyMs is not long ms)
-                continue;
-
-            long bucket = sample.Time.Ticks / windowTicks;
-            totals.TryGetValue(bucket, out var aggregate);
-            totals[bucket] = (aggregate.Sum + ms, aggregate.Count + 1);
-        }
+        var window = new Queue<PingSample>();
+        long sum = 0;
 
         for (int i = 0; i < samples.Length; i++)
         {
-            if (samples[i].LatencyMs is null)
-                continue;
+            PingSample sample = samples[i];
+            if (sample.LatencyMs is long ms)
+            {
+                window.Enqueue(sample);
+                sum += ms;
+            }
 
-            long bucket = samples[i].Time.Ticks / windowTicks;
-            if (totals.TryGetValue(bucket, out var aggregate) && aggregate.Count > 0)
-                result[i] = (double)aggregate.Sum / aggregate.Count;
+            long cutoff = sample.Time.Ticks - windowTicks;
+            while (window.Count > 0 && window.Peek().Time.Ticks < cutoff)
+            {
+                PingSample expired = window.Dequeue();
+                sum -= expired.LatencyMs!.Value;
+            }
+
+            if (sample.LatencyMs.HasValue && window.Count > 0)
+                result[i] = (double)sum / window.Count;
         }
 
         return result;
@@ -56,16 +55,15 @@ public static class PingStats
 
     /// <summary>
     /// Сводит историю к одной точке на каждый интервал: среднее удачных проверок
-    /// (если удачных не было — точка без ответа). Незавершённый последний интервал
-    /// не включается, если в истории есть и завершённые интервалы.
+    /// (если удачных не было — точка без ответа). Текущий интервал тоже включается,
+    /// поэтому график обновляется с каждым пакетом, а не раз в длину окна усреднения.
     /// </summary>
-    public static PingSample[] ToBuckets(PingSample[] samples, DateTime now)
+    public static PingSample[] ToBuckets(PingSample[] samples)
     {
         if (samples.Length == 0)
             return Array.Empty<PingSample>();
 
         long windowTicks = WindowTicks;
-        long nowBucket = now.Ticks / windowTicks;
         var buckets = new List<PingSample>();
 
         int i = 0;
@@ -92,46 +90,29 @@ public static class PingStats
             i = j;
         }
 
-        if (buckets.Count > 1 && buckets[^1].Time.Ticks / windowTicks >= nowBucket)
-            buckets.RemoveAt(buckets.Count - 1);
-
         return buckets.ToArray();
     }
 
     /// <summary>
-    /// Среднее за последний полностью завершённый интервал.
-    /// Текущий, ещё не закрывшийся интервал игнорируется, чтобы среднее не
-    /// обновлялось вместе с текущим ping при включённой галке "Текущий пинг".
+    /// Скользящее среднее до последней проверки. Значение пересчитывается с каждым
+    /// результатом ping, не ожидая окончания какого-либо фиксированного интервала.
     /// </summary>
     public static double? CurrentAverage(IReadOnlyList<PingSample> history)
     {
         if (history.Count == 0)
             return null;
 
-        long windowTicks = WindowTicks;
-        long nowBucket = DateTime.Now.Ticks / windowTicks;
-        long targetBucket = nowBucket;
-
-        for (int i = history.Count - 1; i >= 0; i--)
-        {
-            long bucket = history[i].Time.Ticks / windowTicks;
-            if (bucket != nowBucket)
-            {
-                targetBucket = bucket;
-                break;
-            }
-        }
-
-        // Если в истории ещё нет полного предыдущего интервала, среднее пока не отображаем.
-        if (targetBucket == nowBucket && history[^1].Time.Ticks / windowTicks == nowBucket)
-            return null;
-
+        long cutoff = history[^1].Time.Ticks - WindowTicks;
         long sum = 0;
         int count = 0;
 
-        foreach (PingSample sample in history)
+        for (int i = history.Count - 1; i >= 0; i--)
         {
-            if (sample.Time.Ticks / windowTicks != targetBucket || sample.LatencyMs is not long ms)
+            PingSample sample = history[i];
+            if (sample.Time.Ticks < cutoff)
+                break;
+
+            if (sample.LatencyMs is not long ms)
                 continue;
 
             sum += ms;

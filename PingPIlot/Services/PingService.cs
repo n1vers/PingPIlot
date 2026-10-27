@@ -35,10 +35,14 @@ public static class PingService
         }
 
         public IPAddress[] Addresses { get; }
-        public DateTime ResolvedAt { get; }
+        // Это время последней попытки DNS. При временной ошибке DNS оно тоже
+        // обновляется, чтобы не запускать новый резолв на каждый пакет.
+        public DateTime ResolvedAt { get; private set; }
 
         /// <summary>Адрес, который в последний раз ответил на ping. Проверяется первым.</summary>
         public volatile IPAddress? LastGood;
+
+        public void MarkResolveAttempt() => ResolvedAt = DateTime.UtcNow;
     }
 
     private static readonly ConcurrentDictionary<string, DnsEntry> DnsCache =
@@ -46,6 +50,17 @@ public static class PingService
 
     private static readonly ConcurrentDictionary<string, DateTime> DnsFailures =
         new(StringComparer.OrdinalIgnoreCase);
+
+    // Если одновременно (10 пакетов в секунду на компьютер) истёк срок DNS-кэша, имя
+    // спрашивается один раз, а все остальные пакеты ждут тот же запрос, а не шлют 10 своих.
+    private static readonly ConcurrentDictionary<string, Task<IPAddress[]>> ResolveInFlight =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    // Объекты Ping переиспользуются: каждый держит собственный системный ICMP-дескриптор,
+    // и создавать/закрывать его на каждый из десятков пакетов в секунду дорого.
+    // Один экземпляр одновременно обслуживает только один запрос, поэтому это именно пул.
+    private static readonly ConcurrentQueue<Ping> PingPool = new();
+    private const int MaxPooledPings = 64;
 
     /// <summary>Забывает все найденные адреса: следующая проверка заново спросит DNS.</summary>
     public static void ClearDnsCache()
@@ -159,20 +174,13 @@ public static class PingService
     private static async Task<PingResult> PingHostNameAsync(
         string host, int timeoutMs, bool deepCheck, int attempts)
     {
-        (DnsEntry entry, bool fromCache) = await GetEntryAsync(host, deepCheck, timeoutMs);
+        DnsEntry entry = await GetEntryAsync(host, deepCheck, timeoutMs);
         // Обычная проверка по таймеру — один быстрый ping, как раньше, чтобы цикл не растягивался.
         // Остальные адреса из DNS перебираются только при полной проверке.
-        PingResult result = await PingCandidatesAsync(entry, timeoutMs, attempts, tryAll: deepCheck);
-
-        // Закэшированный адрес мог устареть (компьютеру выдали другой IP). Если проверка не удалась —
-        // забываем его: следующая проверка заново спросит DNS. Ждать DNS прямо сейчас не нужно.
-        if (!result.Ok && fromCache && DateTime.UtcNow - entry.ResolvedAt >= MinReResolveInterval)
-            DnsCache.TryRemove(host, out _);
-
-        return result;
+        return await PingCandidatesAsync(entry, timeoutMs, attempts, tryAll: deepCheck);
     }
 
-    private static async Task<(DnsEntry Entry, bool FromCache)> GetEntryAsync(string host, bool force, int timeoutMs)
+    private static async Task<DnsEntry> GetEntryAsync(string host, bool force, int timeoutMs)
     {
         DnsCache.TryGetValue(host, out DnsEntry? cached);
 
@@ -186,15 +194,15 @@ public static class PingService
         }
 
         if (!force && cached != null && DateTime.UtcNow - cached.ResolvedAt < DnsCacheTtl)
-            return (cached, true);
+            return cached;
 
         try
         {
-            IPAddress[] addresses = await ResolveAsync(host, timeoutMs);
+            IPAddress[] addresses = await ResolveSharedAsync(host, timeoutMs);
             var entry = new DnsEntry(addresses, DateTime.UtcNow, cached?.LastGood);
             DnsCache[host] = entry;
             DnsFailures.TryRemove(host, out _);
-            return (entry, false);
+            return entry;
         }
         catch (Exception) when (cached == null)
         {
@@ -204,8 +212,41 @@ public static class PingService
         catch (Exception) when (cached != null)
         {
             // Резолвер временно недоступен: лучше проверить по последнему известному адресу,
-            // чем сразу показывать «Ошибка DNS».
-            return (cached, true);
+            // чем сразу показывать «Ошибка DNS». Сохраняем время попытки, чтобы
+            // ошибочный DNS не запускался снова на каждом из частых ping-пакетов.
+            cached.MarkResolveAttempt();
+            return cached;
+        }
+    }
+
+    /// <summary>Один DNS-запрос на имя: параллельные вызовы получают результат того же запроса.</summary>
+    private static Task<IPAddress[]> ResolveSharedAsync(string host, int timeoutMs)
+    {
+        var completion = new TaskCompletionSource<IPAddress[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<IPAddress[]> stored = ResolveInFlight.GetOrAdd(host, completion.Task);
+
+        // Такой запрос уже выполняется — просто ждём его результат.
+        if (!ReferenceEquals(stored, completion.Task))
+            return stored;
+
+        _ = RunResolveAsync(host, timeoutMs, completion);
+        return completion.Task;
+    }
+
+    private static async Task RunResolveAsync(
+        string host, int timeoutMs, TaskCompletionSource<IPAddress[]> completion)
+    {
+        try
+        {
+            completion.TrySetResult(await ResolveAsync(host, timeoutMs).ConfigureAwait(false));
+        }
+        catch (Exception ex)
+        {
+            completion.TrySetException(ex);
+        }
+        finally
+        {
+            ResolveInFlight.TryRemove(host, out _);
         }
     }
 
@@ -237,9 +278,11 @@ public static class PingService
     private static async Task<PingResult> PingCandidatesAsync(DnsEntry entry, int timeoutMs, int attempts, bool tryAll)
     {
         IPAddress? lastGood = entry.LastGood;
-        IPAddress[] ordered = lastGood != null && entry.Addresses.Contains(lastGood)
-            ? entry.Addresses.OrderBy(a => a.Equals(lastGood) ? 0 : 1).ToArray()
-            : entry.Addresses;
+        IPAddress[] ordered = entry.Addresses;
+
+        // Обычный случай — последний рабочий адрес уже первый: ничего не пересортировываем.
+        if (lastGood != null && ordered.Length > 1 && !ordered[0].Equals(lastGood) && ordered.Contains(lastGood))
+            ordered = ordered.OrderBy(a => a.Equals(lastGood) ? 0 : 1).ToArray();
 
         PingResult first = default;
 
@@ -285,10 +328,18 @@ public static class PingService
         // нельзя: при «узел недоступен» отвечает шлюз или сам компьютер, и в плитке оказывался чужой IP.
         string target = address.ToString();
 
+        Ping? ping = null;
         try
         {
-            using var ping = new Ping();
-            PingReply reply = await ping.SendPingAsync(address, timeoutMs);
+            if (!PingPool.TryDequeue(out ping))
+                ping = new Ping();
+
+            PingReply reply = await ping.SendPingAsync(address, timeoutMs).ConfigureAwait(false);
+
+            // Исправный объект возвращаем в пул; после исключения он будет уничтожен в finally.
+            Ping toReturn = ping;
+            ping = null;
+            ReturnPing(toReturn);
 
             return reply.Status switch
             {
@@ -318,6 +369,19 @@ public static class PingService
         {
             return new PingResult(false, null, "Check failed", target);
         }
+        finally
+        {
+            // Сюда попадаем с непустым ping только после ошибки: такой объект не переиспользуем.
+            ping?.Dispose();
+        }
+    }
+
+    private static void ReturnPing(Ping ping)
+    {
+        if (PingPool.Count < MaxPooledPings)
+            PingPool.Enqueue(ping);
+        else
+            ping.Dispose();
     }
 
     private static bool SameAddresses(IPAddress[] a, IPAddress[] b) =>

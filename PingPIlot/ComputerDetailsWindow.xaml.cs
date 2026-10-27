@@ -60,13 +60,10 @@ public partial class ComputerDetailsWindow : Window
         GroupSelect.ItemsSource = groups;
         GroupSelect.SelectedItem = groups.FirstOrDefault(g => g.Id == tile.Computer.GroupId);
 
-        // Каждая новая проверка обновляет информацию (через привязки) и график.
-        tile.PropertyChanged += OnTileChanged;
-        Closed += (_, _) => tile.PropertyChanged -= OnTileChanged;
+        // Информацию обновляют привязки, а график и матрица сами подписаны на плитку
+        // и перерисовываются с ограничением частоты. Лишний InvalidateVisual на каждый
+        // пакет заставлял полный график (до 3600 точек) перерисовываться до 60 раз в секунду.
     }
-
-    private void OnTileChanged(object? sender, PropertyChangedEventArgs e) =>
-        Graph.InvalidateVisual();
 
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
@@ -96,6 +93,7 @@ public partial class ComputerDetailsWindow : Window
         Graph.Visibility = Visibility.Visible;
         Matrix.Visibility = Visibility.Collapsed;
         ViewTitle.Text = "ГРАФИК ПИНГА";
+        Graph.InvalidateVisual();
     }
 
     private void OpenMatrixButton_Click(object sender, RoutedEventArgs e)
