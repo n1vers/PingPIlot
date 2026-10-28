@@ -113,6 +113,7 @@ public partial class MainWindow : Window
         InitializeSort();
         LoadGroups();
         LoadNetworks();
+        InitializeLocalIps();
         InitializeScannerSettings();
         InitializeUserSettings();
         UpdateTrayIcon();

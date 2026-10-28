@@ -1,5 +1,6 @@
 <Window x:Class="PingPilot.ComputerDetailsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        PreviewKeyDown="ComputerDetailsWindow_PreviewKeyDown"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:PingPilot"
         Title="Подробности компьютера"

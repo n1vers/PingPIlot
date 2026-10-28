@@ -50,4 +50,36 @@ public class NetworkDiscoveryService
             .ThenBy(n => n.IpAddress)
             .ToList();
     }
+
+    // Все IPv4-адреса этого компьютера (для вывода на дашборде), без loopback и APIPA.
+    public List<LocalAddressInfo> GetLocalAddresses()
+    {
+        var result = new List<LocalAddressInfo>();
+
+        foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != OperationalStatus.Up ||
+                nic.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+                continue;
+
+            foreach (UnicastIPAddressInformation unicast in nic.GetIPProperties().UnicastAddresses)
+            {
+                if (unicast.Address.AddressFamily != AddressFamily.InterNetwork)
+                    continue;
+
+                byte[] b = unicast.Address.GetAddressBytes();
+                if (b[0] == 169 && b[1] == 254)
+                    continue;
+
+                result.Add(new LocalAddressInfo(nic.Name, unicast.Address.ToString()));
+            }
+        }
+
+        return result
+            .OrderBy(a => a.Name)
+            .ThenBy(a => a.Address)
+            .ToList();
+    }
 }
+
+public record LocalAddressInfo(string Name, string Address);

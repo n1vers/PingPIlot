@@ -88,6 +88,17 @@ public partial class ComputerDetailsWindow : Window
     private async void RdpButton_Click(object sender, RoutedEventArgs e) =>
         await _rdpOpen(_tile);
 
+    private void ComputerDetailsWindow_PreviewKeyDown(
+    object sender,
+    System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Escape)
+        {
+            e.Handled = true;
+            Close();
+        }
+    }
+
     private void OpenGraphButton_Click(object sender, RoutedEventArgs e)
     {
         Graph.Visibility = Visibility.Visible;
