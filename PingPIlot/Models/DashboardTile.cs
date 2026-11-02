@@ -152,6 +152,10 @@ public class DashboardTile : INotifyPropertyChanged
     public string LossPercentText => _sent == 0 ? "—" : $"{_sent - _received} ({LossPercent:F1}%)";
     public string SentReceivedText => $"{_sent} / {_received}";
 
+    /// <summary>Сколько проверок отправлено и сколько из них потеряно (для сводки по группам).</summary>
+    public int SentCount => _sent;
+    public int LostCount => _sent - _received;
+
     public string StateText
     {
         get

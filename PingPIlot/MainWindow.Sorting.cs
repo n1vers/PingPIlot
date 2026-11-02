@@ -36,20 +36,43 @@ public partial class MainWindow
         _loadingSort = false;
 
         _loadingVisualization = true;
-        TileVisualizationCombo.SelectedIndex = string.Equals(_data.UserSettings?.TileVisualization, "Matrix", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        bool matrix = string.Equals(_data.UserSettings?.TileVisualization, "Matrix", StringComparison.OrdinalIgnoreCase);
+        ViewMatrixButton.IsChecked = matrix;
+        ViewGraphButton.IsChecked = !matrix;
         _loadingVisualization = false;
     }
 
-    private void TileVisualizationCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    // «График» / «Матрица»: две кнопки-переключателя вместо списка.
+    private void ViewModeButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_loadingVisualization || TileVisualizationCombo.SelectedItem is not ComboBoxItem item)
+        if (_loadingVisualization || sender is not RadioButton button)
             return;
 
-        string mode = item.Tag?.ToString() ?? "Graph";
+        string mode = button.Tag?.ToString() ?? "Graph";
+        if (string.Equals(_data.UserSettings.TileVisualization, mode, StringComparison.OrdinalIgnoreCase))
+            return;
+
         _data.UserSettings.TileVisualization = mode;
         foreach (DashboardTile tile in _tileCache.Values)
             tile.SetVisualizationMode(mode);
         SaveData();
+    }
+
+    // «График / Матрица» на вкладке «Сессии». Свойство зависимости, чтобы шаблоны плиток
+    // и большой график справа переключались одной привязкой, не затрагивая вид дашборда.
+    public static readonly DependencyProperty SessionShowMatrixProperty = DependencyProperty.Register(
+        nameof(SessionShowMatrix), typeof(bool), typeof(MainWindow), new PropertyMetadata(false));
+
+    public bool SessionShowMatrix
+    {
+        get => (bool)GetValue(SessionShowMatrixProperty);
+        set => SetValue(SessionShowMatrixProperty, value);
+    }
+
+    private void SessionViewButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is RadioButton button)
+            SessionShowMatrix = string.Equals(button.Tag?.ToString(), "Matrix", StringComparison.OrdinalIgnoreCase);
     }
 
     private void SortCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)

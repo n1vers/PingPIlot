@@ -34,6 +34,11 @@ public partial class MainWindow
             LocalIpList.ItemsSource = addresses.Count > 0
                 ? addresses
                 : new List<LocalAddressInfo> { new("", "нет подключения") };
+
+            var gateways = _localIpDiscovery.GetGateways();
+            GatewayList.ItemsSource = gateways.Count > 0
+                ? gateways
+                : new List<LocalAddressInfo> { new("", "нет шлюза") };
         }
         catch (Exception ex)
         {

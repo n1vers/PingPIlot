@@ -123,9 +123,11 @@ public static class Dialogs
             added++;
             SetStatus($"Добавлено: {address}  (всего за сеанс: {added})", isError: false);
 
-            // Оставляем IP в поле, чтобы можно было быстро его изменить.
-            host.SelectAll();
+            // Оставляем IP в поле, чтобы можно было быстро его изменить, но без выделения:
+            // курсор ставится в конец, и следующий символ не заменяет весь адрес.
             host.Focus();
+            host.CaretIndex = host.Text.Length;
+            host.SelectionLength = 0;
 
             // Описание очищаем, чтобы случайно не присвоить его следующему ПК.
             description.Clear();

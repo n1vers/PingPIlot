@@ -275,6 +275,106 @@ public sealed class SessionStoreService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Saves a copy of the selected group's events as a permanent session on request.
+    /// Unlike <see cref="SaveSession"/>, the active log keeps running, so monitoring and
+    /// the live journal are not interrupted. Returns null when the group has no events yet.
+    /// </summary>
+    public MonitoringSession? SaveSnapshot(
+        MonitoringSession active,
+        Guid groupId,
+        string groupName,
+        IReadOnlyCollection<SessionComputerSnapshot> computers)
+    {
+        lock (_sync)
+        {
+            EnsureActiveSession(active);
+
+            if (groupId == Guid.Empty)
+                throw new ArgumentException("A group must be selected to save a session.", nameof(groupId));
+
+            // Дописываем буфер на диск, чтобы в копию попали и самые свежие записи.
+            _activeWriter?.Flush();
+            _writesSinceFlush = 0;
+
+            var saved = new MonitoringSession
+            {
+                StartedAt = active.StartedAt,
+                EndedAt = DateTime.Now,
+                GroupId = groupId,
+                GroupName = groupName,
+                Computers = computers.ToList()
+            };
+
+            string logPath = GetLogPath(saved.Id);
+            string metadataPath = GetMetadataPath(saved.Id);
+            string logTempPath = logPath + ".tmp";
+            string metadataTempPath = metadataPath + ".tmp";
+
+            try
+            {
+                long count = 0;
+                var computerIds = new HashSet<Guid>();
+
+                // Журнал открыт на запись основным потоком, поэтому читаем его с общим доступом.
+                using (var stream = new FileStream(_activeLogPath!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true))
+                using (var writer = new StreamWriter(logTempPath, append: false, new UTF8Encoding(false)))
+                {
+                    string? line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(line))
+                            continue;
+
+                        SessionLogEntry? entry;
+                        try
+                        {
+                            entry = JsonSerializer.Deserialize<SessionLogEntry>(line);
+                        }
+                        catch (JsonException)
+                        {
+                            // Последняя строка могла быть записана не до конца.
+                            continue;
+                        }
+
+                        if (entry == null || entry.GroupId != groupId)
+                            continue;
+
+                        entry.GroupName = groupName;
+                        writer.WriteLine(JsonSerializer.Serialize(entry));
+                        count++;
+                        computerIds.Add(entry.ComputerId);
+                    }
+                }
+
+                if (count == 0)
+                {
+                    File.Delete(logTempPath);
+                    return null;
+                }
+
+                saved.EntryCount = count;
+                computerIds.UnionWith(saved.Computers.Select(computer => computer.Id));
+                saved.ComputerCount = computerIds.Count;
+
+                File.WriteAllText(metadataTempPath, JsonSerializer.Serialize(saved, _jsonOptions), new UTF8Encoding(false));
+
+                File.Move(logTempPath, logPath, overwrite: true);
+                File.Move(metadataTempPath, metadataPath, overwrite: true);
+                return saved;
+            }
+            catch
+            {
+                if (File.Exists(logTempPath))
+                    File.Delete(logTempPath);
+                if (File.Exists(metadataTempPath))
+                    File.Delete(metadataTempPath);
+                throw;
+            }
+        }
+    }
+
     public void DiscardSession(MonitoringSession session)
     {
         lock (_sync)

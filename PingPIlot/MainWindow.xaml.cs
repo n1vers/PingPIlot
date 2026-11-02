@@ -61,6 +61,7 @@ public partial class MainWindow : Window
     private Forms.NotifyIcon? _trayIcon;
     private const int MaxLiveSessionRows = 3000;
     private const int MaxLiveSessionEntriesPerFlush = 100;
+    private const int MaxPingResultsPerUiFlush = 200;
     private const int PingTimeoutMs = 800;
     private const int ForcedPingTimeoutMs = 3000;
     private static readonly TimeSpan RdpCheckInterval = TimeSpan.FromSeconds(5);
@@ -74,8 +75,8 @@ public partial class MainWindow : Window
 
     // Масштаб сохраняется не на каждое деление колеса, а когда пользователь закончил крутить.
     private readonly DispatcherTimer _scaleSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(600) };
-    private readonly DispatcherTimer _pingResultUpdateTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
-    private readonly DispatcherTimer _liveSessionUpdateTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    private readonly DispatcherTimer _pingResultUpdateTimer = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(100) };
+    private readonly DispatcherTimer _liveSessionUpdateTimer = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(250) };
 
     public MainWindow()
     {
@@ -114,6 +115,7 @@ public partial class MainWindow : Window
         LoadGroups();
         LoadNetworks();
         InitializeLocalIps();
+        InitializeCharts();
         InitializeScannerSettings();
         InitializeUserSettings();
         UpdateTrayIcon();
@@ -478,6 +480,10 @@ public partial class MainWindow : Window
     {
         Guid? id = select ?? CurrentGroup?.Id;
 
+        // Группы всегда идут по алфавиту. Сортируем сам список, чтобы вкладки,
+        // диалоги и окна подробностей показывали один и тот же порядок.
+        _data.Groups.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase));
+
         _loadingGroups = true;
         GroupTabs.ItemsSource = null;
         GroupTabs.ItemsSource = _data.Groups;
@@ -523,6 +529,7 @@ public partial class MainWindow : Window
             : "";
 
         UpdateSummary();
+        RefreshGroupCharts();
         _ = RefreshTilesAsync();
     }
 
@@ -686,8 +693,10 @@ public partial class MainWindow : Window
         List<SessionLogEntry>? entries = null;
         List<DashboardTile>? touched = null;
 
-        while (_pendingPingResults.TryDequeue(out var pending))
+        int processed = 0;
+        while (processed < MaxPingResultsPerUiFlush && _pendingPingResults.TryDequeue(out var pending))
         {
+            processed++;
             // Ответ на пакет, отправленный до сброса статистики, в новую статистику не попадает.
             if (pending.Epoch != epoch)
                 continue;
@@ -936,6 +945,7 @@ public partial class MainWindow : Window
             return;
 
         RebuildTiles();
+        RefreshGroupCharts();
         if (_showingCurrentSessionView)
             RefreshCurrentSessionView();
     }
@@ -1305,7 +1315,7 @@ public partial class MainWindow : Window
         SessionViewHeaderText.Text =
             $"Текущая сессия · группа «{groupName}» · начата {_currentSession.StartedAt:dd.MM.yyyy HH:mm:ss} · " +
             $"событий группы в текущем журнале: {visibleEntries} · всего записей в активной сессии: {_currentSession.EntryCount} · {stats}. " +
-            "При сохранении останется только выбранная группа.";
+            "Сессия сохраняется кнопкой «Сохранить сессию» (только выбранная группа).";
     }
 
     private static string FormatSessionStats(IEnumerable<SessionLogEntry> source)
@@ -1347,6 +1357,7 @@ public partial class MainWindow : Window
 
         _observedSessionGraphTile = tile;
         SessionGraph.Tile = tile;
+        SessionMatrix.Tile = tile;
 
         if (tile != null)
             tile.PropertyChanged += SessionGraphTile_PropertyChanged;
@@ -1369,7 +1380,7 @@ public partial class MainWindow : Window
     {
         if (tile == null)
         {
-            SessionSelectedComputerText.Text = "Выберите компьютер в матрице, чтобы посмотреть его график";
+            SessionSelectedComputerText.Text = "Выберите компьютер в списке, чтобы посмотреть его график";
             return;
         }
 
@@ -1528,12 +1539,71 @@ public partial class MainWindow : Window
         }
     }
 
+    // Сессия сохраняется только по запросу: кнопка «Сохранить сессию» кладёт в архив журнал
+    // выбранной группы, а мониторинг и текущий журнал продолжают работать.
+    private async void SaveSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (CurrentGroup is not { } group)
+        {
+            ShowWarning("Сначала выберите группу на дашборде: сохраняется журнал одной группы.");
+            return;
+        }
+
+        try
+        {
+            // Дописываем уже принятые результаты, чтобы они попали в сохраняемую сессию.
+            FlushPingResults();
+            await _sessionWriteTask;
+
+            List<SessionComputerSnapshot> computers = BuildSessionSnapshots(group);
+            MonitoringSession? saved = await Task.Run(() =>
+                _sessionStore.SaveSnapshot(_currentSession, group.Id, group.Name, computers));
+
+            if (saved == null)
+            {
+                ShowWarning($"В группе «{group.Name}» пока нет записей — сохранять нечего.");
+                return;
+            }
+
+            RefreshSavedSessionsList();
+            MessageBox.Show(
+                this,
+                $"Сессия сохранена.\n\nГруппа: {group.Name}\nЗаписей: {saved.EntryCount}\nКомпьютеров: {saved.ComputerCount}",
+                "PingPilot — сессия сохранена",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось сохранить сессию.", ex);
+        }
+    }
+
+    private List<SessionComputerSnapshot> BuildSessionSnapshots(ComputerGroup group) =>
+        _data.Computers
+            .Where(computer => computer.GroupId == group.Id)
+            .Select(computer =>
+            {
+                DashboardTile tile = GetOrCreateTile(computer);
+                return new SessionComputerSnapshot
+                {
+                    Id = computer.Id,
+                    Name = computer.Name,
+                    Host = computer.Host,
+                    Description = computer.Description,
+                    IpAddress = string.Equals(tile.IpAddressText, "не определён", StringComparison.OrdinalIgnoreCase)
+                        ? ""
+                        : tile.IpAddressText
+                };
+            })
+            .ToList();
+
     private void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
         if (_allowClose)
             return;
 
-        // Дожидаемся, пока фоновая запись допишет уже принятые результаты в журнал.
+        // Дожидаемся, пока фоновая запись допишет принятые результаты в журнал.
         try
         {
             _sessionWriteTask.Wait(TimeSpan.FromSeconds(3));
@@ -1543,106 +1613,18 @@ public partial class MainWindow : Window
             Debug.WriteLine($"Session writer failed: {ex}");
         }
 
-        if (_currentSession.EntryCount == 0)
-        {
-            try
-            {
-                _sessionStore.DiscardSession(_currentSession);
-                _allowClose = true;
-            }
-            catch (Exception ex)
-            {
-                ShowError("Не удалось закрыть временный журнал сессии.", ex);
-                e.Cancel = true;
-            }
-            return;
-        }
-
-        ComputerGroup? group = CurrentGroup;
-        if (group == null)
-        {
-            MessageBoxResult noGroupChoice = MessageBox.Show(
-                this,
-                "Сейчас на дашборде не выбрана группа, поэтому сессию нельзя сохранить только для одного профиля. Закрыть без сохранения?",
-                "PingPilot — нет выбранной группы",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Information);
-
-            if (noGroupChoice != MessageBoxResult.Yes)
-            {
-                e.Cancel = true;
-                return;
-            }
-
-            try
-            {
-                _sessionStore.DiscardSession(_currentSession);
-                _allowClose = true;
-            }
-            catch (Exception ex)
-            {
-                ShowError("Не удалось удалить временную сессию.", ex);
-                e.Cancel = true;
-            }
-            return;
-        }
-
+        // Сессия сохраняется только по запросу, поэтому при выходе вопросов нет:
+        // временный журнал просто удаляется, а сохранённые сессии остаются на месте.
         try
         {
-            (long EntryCount, int ComputerCount) summary = _sessionStore.GetActiveSummary(group.Id);
-            List<SessionComputerSnapshot> computers = _data.Computers
-                .Where(computer => computer.GroupId == group.Id)
-                .Select(computer =>
-                {
-                    DashboardTile tile = GetOrCreateTile(computer);
-                    return new SessionComputerSnapshot
-                    {
-                        Id = computer.Id,
-                        Name = computer.Name,
-                        Host = computer.Host,
-                        Description = computer.Description,
-                        IpAddress = string.Equals(tile.IpAddressText, "не определён", StringComparison.OrdinalIgnoreCase)
-                            ? ""
-                            : tile.IpAddressText
-                    };
-                })
-                .ToList();
-
-            MessageBoxResult choice = MessageBox.Show(
-                this,
-                $"Сохранить сессию мониторинга только для выбранной группы «{group.Name}»?\n\n" +
-                $"Начало: {_currentSession.StartedAt:dd.MM.yyyy HH:mm:ss}\n" +
-                $"Группа: {group.Name}\n" +
-                $"Событий в этой группе: {summary.EntryCount}\n" +
-                $"Компьютеров в матрице: {computers.Count}\n\n" +
-                "Графики и историю каждого компьютера этой группы можно будет открыть позже.\n\n" +
-                "Да — сохранить выбранную группу.\nНет — закрыть без сохранения.\nОтмена — вернуться в программу.",
-                "PingPilot — сохранение сессии",
-                MessageBoxButton.YesNoCancel,
-                MessageBoxImage.Question);
-
-            if (choice == MessageBoxResult.Cancel)
-            {
-                e.Cancel = true;
-                return;
-            }
-
-            if (choice == MessageBoxResult.Yes)
-            {
-                _sessionStore.SaveSession(_currentSession, group.Id, group.Name, computers);
-            }
-            else
-            {
-                _sessionStore.DiscardSession(_currentSession);
-            }
-
-            _allowClose = true;
+            _sessionStore.DiscardSession(_currentSession);
         }
         catch (Exception ex)
         {
-            ShowError("Не удалось завершить сессию. Программа останется открытой, чтобы журнал не потерялся.", ex);
-            e.Cancel = true;
+            Debug.WriteLine($"Could not discard temporary session log: {ex}");
         }
+
+        _allowClose = true;
     }
 
 }

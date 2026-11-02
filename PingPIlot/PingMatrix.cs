@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -46,6 +47,7 @@ public class PingMatrix : FrameworkElement
     private int _columns;
     private int _rows;
     private int _offset;
+    private ToolTip? _hoverToolTip;
     private bool _isAttached;
     private readonly DispatcherTimer _renderTimer;
 
@@ -61,6 +63,10 @@ public class PingMatrix : FrameworkElement
             if (IsVisible)
                 InvalidateVisual();
         };
+        ToolTipService.SetIsEnabled(this, true);
+        ToolTipService.SetInitialShowDelay(this, 0);
+        ToolTipService.SetShowDuration(this, int.MaxValue);
+        ToolTipService.SetBetweenShowDelay(this, 0);
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) =>
         {
@@ -233,14 +239,45 @@ public class PingMatrix : FrameworkElement
         }
 
         PingSample sample = _samples[index];
-        ToolTip = sample.LatencyMs.HasValue
-            ? $"{sample.Time:dd.MM HH:mm:ss} — {sample.LatencyMs} ms"
-            : $"{sample.Time:dd.MM HH:mm:ss} — {sample.Status}";
+        if (UseMiniHistory)
+        {
+            SetHoverToolTip(sample.LatencyMs.HasValue
+                ? $"{sample.Time:dd.MM HH:mm:ss} — {sample.LatencyMs} ms"
+                : $"{sample.Time:dd.MM HH:mm:ss} — {sample.Status}");
+            return;
+        }
+
+        // Полный режим (сессии): то же, что в подробностях, — данные конкретной проверки.
+        int lost = 0;
+        for (int i = 0; i < _samples.Length; i++)
+        {
+            if (!_samples[i].LatencyMs.HasValue)
+                lost++;
+        }
+
+        SetHoverToolTip(
+            $"{sample.Time:dd.MM.yyyy HH:mm:ss.fff}\n" +
+            (sample.LatencyMs.HasValue ? $"Ответ: {sample.LatencyMs} ms" : $"Нет ответа: {sample.Status}") +
+            $"\nПроверка {index + 1} из {_samples.Length}, потеряно всего: {lost}");
+    }
+
+    private void SetHoverToolTip(string content)
+    {
+        _hoverToolTip ??= new ToolTip
+        {
+            PlacementTarget = this,
+            StaysOpen = false
+        };
+        _hoverToolTip.Content = content;
+        ToolTip = _hoverToolTip;
+        _hoverToolTip.IsOpen = true;
     }
 
     protected override void OnMouseLeave(MouseEventArgs e)
     {
         base.OnMouseLeave(e);
+        if (_hoverToolTip != null)
+            _hoverToolTip.IsOpen = false;
         ToolTip = null;
     }
 

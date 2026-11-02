@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -43,6 +44,8 @@ public class PingGraph : FrameworkElement
     private double?[] _averages = Array.Empty<double?>();
     private Rect _plot;
     private bool _isAttached;
+    private double? _hoverX;
+    private ToolTip? _hoverToolTip;
     private readonly DispatcherTimer _renderTimer;
 
     public PingGraph()
@@ -60,6 +63,11 @@ public class PingGraph : FrameworkElement
             if (IsVisible)
                 InvalidateVisual();
         };
+        // Подсказка с данными точки появляется сразу и остаётся, пока курсор на графике.
+        ToolTipService.SetIsEnabled(this, true);
+        ToolTipService.SetInitialShowDelay(this, 0);
+        ToolTipService.SetShowDuration(this, int.MaxValue);
+        ToolTipService.SetBetweenShowDelay(this, 0);
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) =>
         {
@@ -299,6 +307,19 @@ public class PingGraph : FrameworkElement
             dc.DrawEllipse(PingPalette.For(current), new Pen(lineBrush, 1.2), new Point(X(n - 1), Y(current)), r, r);
         }
 
+        // Вертикальная линия и маркер в точке, на которую наведён курсор (только в полном режиме).
+        if (!UseMiniHistory && _hoverX is double hx)
+        {
+            int hi = HoverIndex(hx);
+            double cx = X(hi);
+            var crossPen = new Pen(axisBrush, 1) { DashStyle = DashStyles.Dot };
+            dc.DrawLine(crossPen, new Point(cx, plot.Top), new Point(cx, plot.Bottom));
+
+            double? shown = _averages[hi] ?? _samples[hi].LatencyMs;
+            if (shown is double hv)
+                dc.DrawEllipse(Brushes.Transparent, new Pen(lineBrush, 2), new Point(cx, Y(hv)), 7, 7);
+        }
+
         // Подписи времени есть только в полном режиме: в мини-режиме под графиком нет места.
         if (!UseMiniHistory)
         {
@@ -307,6 +328,14 @@ public class PingGraph : FrameworkElement
             dc.DrawText(first, new Point(plot.Left, plot.Bottom + 9));
             dc.DrawText(last, new Point(plot.Right - last.Width, plot.Bottom + 9));
         }
+    }
+
+    private int HoverIndex(double x)
+    {
+        int index = _samples.Length > 1
+            ? (int)Math.Round((x - _plot.Left) / _plot.Width * (_samples.Length - 1))
+            : 0;
+        return Math.Clamp(index, 0, _samples.Length - 1);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -320,23 +349,84 @@ public class PingGraph : FrameworkElement
         }
 
         double x = e.GetPosition(this).X;
-        int index = _samples.Length > 1
-            ? (int)Math.Round((x - _plot.Left) / _plot.Width * (_samples.Length - 1))
-            : 0;
-        index = Math.Clamp(index, 0, _samples.Length - 1);
+        int index = HoverIndex(x);
+        string tooltip = BuildTooltip(index);
+        _hoverToolTip ??= new ToolTip
+        {
+            PlacementTarget = this,
+            StaysOpen = false
+        };
+        _hoverToolTip.Content = tooltip;
+        ToolTip = _hoverToolTip;
+        _hoverToolTip.IsOpen = true;
 
-        PingSample sample = _samples[index];
-        ToolTip = sample.LatencyMs.HasValue && index < _averages.Length && _averages[index] is double avg
-            ? (PingDisplay.ShowCurrent
-                ? $"{sample.Time:HH:mm:ss} — среднее {avg:F0} ms, пинг {sample.LatencyMs} ms"
-                : $"{sample.Time:HH:mm:ss} — среднее {avg:F0} ms")
-            : $"{sample.Time:HH:mm:ss} — {sample.Status}";
+        if (!UseMiniHistory)
+        {
+            _hoverX = x;
+            InvalidateVisual();
+        }
     }
 
     protected override void OnMouseLeave(MouseEventArgs e)
     {
         base.OnMouseLeave(e);
+        if (_hoverToolTip != null)
+            _hoverToolTip.IsOpen = false;
         ToolTip = null;
+        if (_hoverX != null)
+        {
+            _hoverX = null;
+            InvalidateVisual();
+        }
+    }
+
+    // Данные момента: время, результат проверки, среднее и статистика за окно усреднения.
+    private string BuildTooltip(int index)
+    {
+        PingSample sample = _samples[index];
+        string head = sample.Time.ToString("dd.MM.yyyy HH:mm:ss.fff");
+
+        if (UseMiniHistory)
+        {
+            return sample.LatencyMs.HasValue && index < _averages.Length && _averages[index] is double a
+                ? (PingDisplay.ShowCurrent
+                    ? $"{sample.Time:HH:mm:ss} — среднее {a:F0} ms, пинг {sample.LatencyMs} ms"
+                    : $"{sample.Time:HH:mm:ss} — среднее {a:F0} ms")
+                : $"{sample.Time:HH:mm:ss} — {sample.Status}";
+        }
+
+        // Окно усреднения, заканчивающееся на этой точке.
+        long cutoff = sample.Time.Ticks - TimeSpan.FromSeconds(PingStats.AverageIntervalSeconds).Ticks;
+        int total = 0, lost = 0, ok = 0;
+        long min = long.MaxValue, max = long.MinValue;
+        for (int i = index; i >= 0 && _samples[i].Time.Ticks >= cutoff; i--)
+        {
+            total++;
+            if (_samples[i].LatencyMs is long ms)
+            {
+                ok++;
+                if (ms < min) min = ms;
+                if (ms > max) max = ms;
+            }
+            else
+            {
+                lost++;
+            }
+        }
+
+        var lines = new List<string> { head };
+        lines.Add(sample.LatencyMs.HasValue
+            ? $"Ответ: {sample.LatencyMs} ms"
+            : $"Нет ответа: {sample.Status}");
+
+        if (index < _averages.Length && _averages[index] is double avg)
+            lines.Add($"Среднее за {PingStats.AverageIntervalSeconds} с: {avg:F0} ms");
+
+        lines.Add($"Проверок в окне: {total}, потеряно: {lost}");
+        if (ok > 0)
+            lines.Add($"Мин / макс в окне: {min} / {max} ms");
+
+        return string.Join("\n", lines);
     }
 
     // Ломаная по значениям; пропуск (null) разрывает линию.
