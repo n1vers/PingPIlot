@@ -53,7 +53,7 @@ public class PingMatrix : FrameworkElement
 
     public PingMatrix()
     {
-        _renderTimer = new DispatcherTimer(DispatcherPriority.Render)
+        _renderTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(200)
         };

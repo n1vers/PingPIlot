@@ -12,6 +12,8 @@ public sealed class MonitoringSession
     public string GroupName { get; set; } = "";
     public long EntryCount { get; set; }
     public int ComputerCount { get; set; }
+    public double? AverageLatencyMs { get; set; }
+    public double? LossPercent { get; set; }
     public List<SessionComputerSnapshot> Computers { get; set; } = new();
 
     [JsonIgnore]

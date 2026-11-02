@@ -45,6 +45,7 @@ public class PingGraph : FrameworkElement
     private Rect _plot;
     private bool _isAttached;
     private double? _hoverX;
+    private int _hoverIndex = -1;
     private ToolTip? _hoverToolTip;
     private readonly DispatcherTimer _renderTimer;
 
@@ -53,7 +54,7 @@ public class PingGraph : FrameworkElement
         // Отдельные ответы могут приходить десятки раз в секунду. История хранится
         // полностью, а график обновляем 5 раз в секунду: для линии, которая медленно
         // «едет» влево, этого достаточно, а семь графиков не забивают UI-поток.
-        _renderTimer = new DispatcherTimer(DispatcherPriority.Render)
+        _renderTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(200)
         };
@@ -344,21 +345,31 @@ public class PingGraph : FrameworkElement
 
         if (_samples.Length == 0 || _plot.IsEmpty || _plot.Width <= 0)
         {
-            ToolTip = null;
+            if (ToolTip != null)
+                ToolTip = null;
             return;
         }
 
         double x = e.GetPosition(this).X;
         int index = HoverIndex(x);
-        string tooltip = BuildTooltip(index);
-        _hoverToolTip ??= new ToolTip
+        if (_hoverToolTip == null)
         {
-            PlacementTarget = this,
-            StaysOpen = false
-        };
-        _hoverToolTip.Content = tooltip;
-        ToolTip = _hoverToolTip;
-        _hoverToolTip.IsOpen = true;
+            _hoverToolTip = new ToolTip
+            {
+                PlacementTarget = this,
+                StaysOpen = false
+            };
+            ToolTip = _hoverToolTip;
+        }
+
+        if (_hoverIndex != index)
+        {
+            _hoverIndex = index;
+            _hoverToolTip.Content = BuildTooltip(index);
+        }
+
+        if (!_hoverToolTip.IsOpen)
+            _hoverToolTip.IsOpen = true;
 
         if (!UseMiniHistory)
         {
@@ -373,6 +384,7 @@ public class PingGraph : FrameworkElement
         if (_hoverToolTip != null)
             _hoverToolTip.IsOpen = false;
         ToolTip = null;
+        _hoverIndex = -1;
         if (_hoverX != null)
         {
             _hoverX = null;

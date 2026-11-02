@@ -1,3 +1,4 @@
+using System;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
@@ -37,6 +38,218 @@ internal static class ChartKit
         ToolTipService.SetInitialShowDelay(owner, 0);
         ToolTipService.SetShowDuration(owner, int.MaxValue);
         ToolTipService.SetBetweenShowDelay(owner, 0);
+    }
+}
+
+/// <summary>Общий график среднего ping и количества потерянных пакетов группы.</summary>
+public class GroupCombinedChart : FrameworkElement
+{
+    private IReadOnlyList<GroupLossPoint> _lossPoints = Array.Empty<GroupLossPoint>();
+    private IReadOnlyList<GroupAveragePoint> _averagePoints = Array.Empty<GroupAveragePoint>();
+    private Rect _plot = Rect.Empty;
+    private double? _hoverX;
+    private int _hoverIndex = -1;
+    public event Action<string?>? HoverChanged;
+
+    public GroupCombinedChart()
+    {
+        ChartKit.Setup(this);
+        ToolTipService.SetIsEnabled(this, false);
+    }
+
+    public void SetData(
+        IReadOnlyList<GroupLossPoint> lossPoints,
+        IReadOnlyList<GroupAveragePoint> averagePoints)
+    {
+        _lossPoints = lossPoints;
+        _averagePoints = averagePoints;
+        InvalidateVisual();
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        double width = ActualWidth;
+        double height = ActualHeight;
+        dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, width, height));
+
+        Brush axisBrush = ChartKit.Theme(this, "MutedBrush", ChartKit.FallbackText);
+        Brush averageBrush = ChartKit.Theme(this, "GraphLineBrush", PingPalette.Good);
+        Pen gridPen = new(ChartKit.Theme(this, "LineBrush", ChartKit.FallbackGrid), 1)
+        {
+            DashStyle = DashStyles.Dash
+        };
+
+        _plot = new Rect(48, 4, Math.Max(0, width - 48 - 58), Math.Max(0, height - 4 - 18));
+        Rect plot = _plot;
+        if (plot.Width < 60 || plot.Height < 20)
+        {
+            _plot = Rect.Empty;
+            return;
+        }
+
+        int count = Math.Max(_lossPoints.Count, _averagePoints.Count);
+        if (count == 0)
+        {
+            FormattedText waiting = ChartKit.Text(this, "Ждём первую проверку...", axisBrush, 11);
+            dc.DrawText(waiting, new Point(plot.Left + (plot.Width - waiting.Width) / 2,
+                plot.Top + (plot.Height - waiting.Height) / 2));
+            return;
+        }
+
+        double maxMs = _averagePoints
+            .Where(point => point.Value.HasValue)
+            .Select(point => point.Value!.Value)
+            .DefaultIfEmpty(0)
+            .Max();
+        double maxPackets = _lossPoints.Count == 0 ? 0 : _lossPoints.Max(point => point.Lost);
+        double msMax = Math.Max(60, Math.Ceiling(maxMs * 1.15 / 10) * 10);
+        double packetMax = Math.Max(1, maxPackets);
+
+        double YMs(double value) => plot.Bottom - Math.Min(value, msMax) / msMax * plot.Height;
+        double YPackets(double value) => plot.Bottom - Math.Min(value, packetMax) / packetMax * plot.Height;
+        double X(int index) => count > 1
+            ? plot.Left + index * plot.Width / (count - 1)
+            : plot.Left + plot.Width / 2;
+
+        foreach (double value in new[] { 0, msMax / 2, msMax })
+        {
+            double y = YMs(value);
+            dc.DrawLine(gridPen, new Point(plot.Left, y), new Point(plot.Right, y));
+            FormattedText label = ChartKit.Text(this, $"{value:0} ms", axisBrush, 10);
+            dc.DrawText(label, new Point(plot.Left - label.Width - 6, y - label.Height / 2));
+        }
+
+        foreach (double value in new[] { 0, packetMax / 2, packetMax })
+        {
+            double y = YPackets(value);
+            FormattedText label = ChartKit.Text(this, $"{value:0}", axisBrush, 10);
+            dc.DrawText(label, new Point(plot.Right + 6, y - label.Height / 2));
+        }
+
+        DrawLine(dc, _averagePoints, X, point => point.Value, YMs, averageBrush);
+        DrawLine(dc, _lossPoints, X, point => point.Lost, YPackets, PingPalette.Poor);
+
+        for (int i = 0; i < _averagePoints.Count; i++)
+        {
+            if (_averagePoints[i].Value is double value)
+                dc.DrawEllipse(averageBrush, null, new Point(X(i), YMs(value)), 2.5, 2.5);
+        }
+
+        for (int i = 0; i < _lossPoints.Count; i++)
+            dc.DrawEllipse(PingPalette.Poor, null, new Point(X(i), YPackets(_lossPoints[i].Lost)), 2.5, 2.5);
+
+        if (_hoverX is double hoverX)
+        {
+            int index = HoverIndex(hoverX, count);
+            double x = X(index);
+            dc.DrawLine(new Pen(axisBrush, 1) { DashStyle = DashStyles.Dot },
+                new Point(x, plot.Top), new Point(x, plot.Bottom));
+            if (index < _averagePoints.Count && _averagePoints[index].Value is double average)
+                dc.DrawEllipse(Brushes.Transparent, new Pen(averageBrush, 2),
+                    new Point(x, YMs(average)), 6, 6);
+            if (index < _lossPoints.Count)
+                dc.DrawEllipse(Brushes.Transparent, new Pen(PingPalette.Poor, 2),
+                    new Point(x, YPackets(_lossPoints[index].Lost)), 6, 6);
+        }
+
+        DateTime firstTime = _lossPoints.Count > 0 ? _lossPoints[0].Time : _averagePoints[0].Time;
+        DateTime lastTime = _lossPoints.Count > 0 ? _lossPoints[^1].Time : _averagePoints[^1].Time;
+        FormattedText first = ChartKit.Text(this, firstTime.ToString("HH:mm:ss"), axisBrush, 10);
+        FormattedText last = ChartKit.Text(this, lastTime.ToString("HH:mm:ss"), axisBrush, 10);
+        dc.DrawText(first, new Point(plot.Left, plot.Bottom + 3));
+        dc.DrawText(last, new Point(plot.Right - last.Width, plot.Bottom + 3));
+    }
+
+    private static void DrawLine<T>(
+        DrawingContext dc,
+        IReadOnlyList<T> points,
+        Func<int, double> x,
+        Func<T, double?> value,
+        Func<double, double> y,
+        Brush brush)
+    {
+        if (points.Count == 0)
+            return;
+
+        StreamGeometry geometry = new();
+        using (StreamGeometryContext context = geometry.Open())
+        {
+            bool open = false;
+            for (int i = 0; i < points.Count; i++)
+            {
+                if (value(points[i]) is not double current)
+                {
+                    open = false;
+                    continue;
+                }
+
+                Point point = new(x(i), y(current));
+                if (!open)
+                {
+                    context.BeginFigure(point, false, false);
+                    open = true;
+                }
+                else
+                {
+                    context.LineTo(point, true, false);
+                }
+            }
+        }
+
+        geometry.Freeze();
+        dc.DrawGeometry(null, new Pen(brush, 2), geometry);
+    }
+
+    private int HoverIndex(double x, int count) => count > 1
+        ? Math.Clamp((int)Math.Round((x - _plot.Left) / _plot.Width * (count - 1)), 0, count - 1)
+        : 0;
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (_plot.IsEmpty || Math.Max(_lossPoints.Count, _averagePoints.Count) == 0 ||
+            !_plot.Contains(e.GetPosition(this)))
+        {
+            ClearHover();
+            return;
+        }
+
+        int count = Math.Max(_lossPoints.Count, _averagePoints.Count);
+        double x = e.GetPosition(this).X;
+        int index = HoverIndex(x, count);
+        if (_hoverIndex == index)
+            return;
+
+        _hoverIndex = index;
+        _hoverX = x;
+        string averageText = index < _averagePoints.Count && _averagePoints[index].Value is double averageValue
+            ? $"Ping: {averageValue:F0} ms"
+            : "Ping: нет ответа";
+        string lossText = index < _lossPoints.Count
+            ? $"Потери: {_lossPoints[index].Lost}/{_lossPoints[index].Total}"
+            : "Потери: нет данных";
+        HoverChanged?.Invoke($"{averageText} · {lossText}");
+        InvalidateVisual();
+    }
+
+    protected override void OnMouseLeave(MouseEventArgs e)
+    {
+        base.OnMouseLeave(e);
+        ClearHover();
+        if (_hoverX != null)
+        {
+            _hoverX = null;
+            InvalidateVisual();
+        }
+    }
+
+    private void ClearHover()
+    {
+        if (_hoverIndex < 0)
+            return;
+
+        _hoverIndex = -1;
+        HoverChanged?.Invoke(null);
     }
 }
 

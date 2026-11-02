@@ -790,9 +790,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        string target = !string.Equals(tile.IpAddressText, "не определён", StringComparison.OrdinalIgnoreCase)
-            ? tile.IpAddressText
-            : tile.Host;
+        string target = tile.Host;
 
         try
         {
@@ -1297,7 +1295,12 @@ public partial class MainWindow : Window
             _liveSessionEntries.RemoveAt(_liveSessionEntries.Count - 1);
 
         if (added > 0 && _showingCurrentSessionView)
+        {
+            SetSessionGroupChart(CurrentGroup == null
+                ? Array.Empty<SessionLogEntry>()
+                : _liveSessionEntries.Where(entry => entry.GroupId == CurrentGroup.Id));
             UpdateCurrentSessionHeader();
+        }
     }
 
     private bool FilterLiveSessionEntry(object item) =>
@@ -1341,6 +1344,9 @@ public partial class MainWindow : Window
         SessionTileList.ItemsSource = _tiles;
         SessionRecordsGrid.ItemsSource = _liveSessionView;
         _liveSessionView?.Refresh();
+        SetSessionGroupChart(CurrentGroup == null
+            ? Array.Empty<SessionLogEntry>()
+            : _liveSessionEntries.Where(entry => entry.GroupId == CurrentGroup.Id));
 
         if (_observedSessionGraphTile == null || !_tiles.Contains(_observedSessionGraphTile))
             SetSessionGraphTile(_tiles.FirstOrDefault());
@@ -1490,6 +1496,7 @@ public partial class MainWindow : Window
 
             SessionRecordsGrid.ItemsSource = entries;
             BuildSessionMatrix(session, entries);
+            SetSessionGroupChart(entries);
             string groupName = string.IsNullOrWhiteSpace(session.GroupName)
                 ? entries.FirstOrDefault()?.GroupName ?? "не указана"
                 : session.GroupName;
@@ -1568,7 +1575,9 @@ public partial class MainWindow : Window
             RefreshSavedSessionsList();
             MessageBox.Show(
                 this,
-                $"Сессия сохранена.\n\nГруппа: {group.Name}\nЗаписей: {saved.EntryCount}\nКомпьютеров: {saved.ComputerCount}",
+                $"Сессия сохранена.\n\nГруппа: {group.Name}\nЗаписей: {saved.EntryCount}\n" +
+                $"Компьютеров: {saved.ComputerCount}\nСредний ping: {(saved.AverageLatencyMs is double average ? $"{average:F0} ms" : "—")}\n" +
+                $"Потери: {(saved.LossPercent is double loss ? $"{loss:F1}%" : "—")}",
                 "PingPilot — сессия сохранена",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);

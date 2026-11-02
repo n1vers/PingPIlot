@@ -275,35 +275,23 @@
                     </WrapPanel>
                 </Grid>
 
-                <!-- Маленькие графики выбранной группы: потери (PDO) и средний ping. -->
+                <!-- Комбинированный график группы: средний ping и PDO на разных шкалах. -->
                 <Grid Grid.Row="1" Height="100" Margin="0,0,0,8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="12"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <Border Grid.Column="0" Style="{StaticResource Card}" Padding="8,6,8,4">
+                    <Border Style="{StaticResource Card}" Padding="8,6,8,4">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                             <TextBlock x:Name="GroupLossTitle" Text="PDO ГРУППЫ"
-                                       Foreground="{DynamicResource MutedBrush}"
-                                        FontSize="12" FontWeight="SemiBold" Margin="0,0,0,2"/>
-                            <local:GroupLossChart x:Name="GroupLossChartControl" Grid.Row="1"/>
-                        </Grid>
-                    </Border>
-                    <Border Grid.Column="2" Style="{StaticResource Card}" Padding="8,6,8,4">
-                        <Grid>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                            </Grid.RowDefinitions>
-                             <TextBlock x:Name="GroupAverageTitle" Text="СРЕДНИЙ PING ГРУППЫ"
-                                       Foreground="{DynamicResource MutedBrush}"
-                                        FontSize="12" FontWeight="SemiBold" Margin="0,0,0,2"/>
-                            <local:GroupAverageChart x:Name="GroupAverageChartControl" Grid.Row="1"/>
+                            <StackPanel Grid.Row="0" Orientation="Horizontal">
+                                <TextBlock x:Name="GroupChartTitle" Text="ГРУППА: СРЕДНИЙ PING И PDO"
+                                           Foreground="{DynamicResource MutedBrush}"
+                                           FontSize="12" FontWeight="SemiBold" Margin="0,0,14,2"/>
+                                <TextBlock x:Name="GroupChartHoverInfo" Text="Наведи курсор на точку"
+                                           Foreground="{DynamicResource TextBrush}"
+                                           FontSize="14" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                            </StackPanel>
+                            <local:GroupCombinedChart x:Name="GroupCombinedChartControl" Grid.Row="1"/>
                         </Grid>
                     </Border>
                 </Grid>
@@ -312,7 +300,7 @@
                               VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled">
                     <Grid>
-                        <ItemsControl x:Name="TileList">
+                        <ItemsControl x:Name="TileList" Margin="0">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
                                     <!-- Колонки и размер плиток подбираются под ширину окна. -->
@@ -471,7 +459,7 @@
                                                 </StackPanel>
 
                                                 <Grid Grid.Row="5" Margin="0,4,0,0" MinHeight="70" ClipToBounds="True">
-                                                    <local:PingGraph Tile="{Binding}">
+                                                    <local:PingGraph Tile="{Binding}" IsHitTestVisible="False">
                                                         <local:PingGraph.Style>
                                                             <Style TargetType="local:PingGraph">
                                                                 <Style.Triggers>
@@ -720,6 +708,12 @@
                             <DataGridTextColumn Header="Записей"
                                                 Binding="{Binding EntryCount}"
                                                 SortMemberPath="EntryCount" Width="90"/>
+                            <DataGridTextColumn Header="Средний ping"
+                                                Binding="{Binding AverageLatencyMs, StringFormat={}{0:F0} ms}"
+                                                SortMemberPath="AverageLatencyMs" Width="120"/>
+                            <DataGridTextColumn Header="Потери"
+                                                Binding="{Binding LossPercent, StringFormat={}{0:F1}%}"
+                                                SortMemberPath="LossPercent" Width="90"/>
                             <DataGridTextColumn Header="Длительность"
                                                 Binding="{Binding DurationText}"
                                                 SortMemberPath="DurationText" Width="130"/>
@@ -766,11 +760,17 @@
                                                     ToolTip="{Binding Tooltip}">
                                                 <Grid Margin="12,8,12,10">
                                                      <StackPanel>
-                                                         <TextBlock Text="{Binding Name}"
-                                                                    Foreground="{DynamicResource TextBrush}"
-                                                                    FontSize="15"
-                                                                    FontWeight="SemiBold"
-                                                                    TextTrimming="CharacterEllipsis"/>
+                                                         <StackPanel Orientation="Horizontal">
+                                                             <Border Width="10" Height="10" CornerRadius="5"
+                                                                     Background="{Binding StatusBrush}"
+                                                                     VerticalAlignment="Center"
+                                                                     Margin="0,0,7,0"/>
+                                                             <TextBlock Text="{Binding Name}"
+                                                                        Foreground="{DynamicResource TextBrush}"
+                                                                        FontSize="15"
+                                                                        FontWeight="SemiBold"
+                                                                        TextTrimming="CharacterEllipsis"/>
+                                                         </StackPanel>
                                                          <TextBlock Text="{Binding StatusLabel}"
                                                                     Foreground="{DynamicResource MutedBrush}"
                                                                     FontSize="12"
@@ -789,6 +789,7 @@
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="*"/>
+                                        <RowDefinition Height="120"/>
                                     </Grid.RowDefinitions>
                                     <TextBlock x:Name="SessionSelectedComputerText"
                                                Text="Выберите компьютер в матрице, чтобы посмотреть его график"
@@ -839,6 +840,18 @@
                                             </local:PingMatrix.Style>
                                         </local:PingMatrix>
                                     </Grid>
+                                    <Border Grid.Row="3" Style="{StaticResource Card}" Margin="0,10,0,0" Padding="8,6,8,4">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="*"/>
+                                            </Grid.RowDefinitions>
+                                            <TextBlock Text="Средний ping и потери пакетов сессии"
+                                                       Foreground="{DynamicResource MutedBrush}"
+                                                       FontSize="12" FontWeight="SemiBold"/>
+                                            <local:GroupCombinedChart x:Name="SessionGroupCombinedChart" Grid.Row="1"/>
+                                        </Grid>
+                                    </Border>
                                 </Grid>
                             </Border>
                             </Grid>

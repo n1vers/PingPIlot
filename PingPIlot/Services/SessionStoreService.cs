@@ -314,6 +314,9 @@ public sealed class SessionStoreService : IDisposable
             try
             {
                 long count = 0;
+                long successfulCount = 0;
+                long latencySum = 0;
+                long latencyCount = 0;
                 var computerIds = new HashSet<Guid>();
 
                 // Журнал открыт на запись основным потоком, поэтому читаем его с общим доступом.
@@ -344,6 +347,13 @@ public sealed class SessionStoreService : IDisposable
                         entry.GroupName = groupName;
                         writer.WriteLine(JsonSerializer.Serialize(entry));
                         count++;
+                        if (entry.Success)
+                            successfulCount++;
+                        if (entry.LatencyMs is long latency)
+                        {
+                            latencySum += latency;
+                            latencyCount++;
+                        }
                         computerIds.Add(entry.ComputerId);
                     }
                 }
@@ -355,6 +365,8 @@ public sealed class SessionStoreService : IDisposable
                 }
 
                 saved.EntryCount = count;
+                saved.AverageLatencyMs = latencyCount == 0 ? null : (double)latencySum / latencyCount;
+                saved.LossPercent = (count - successfulCount) * 100.0 / count;
                 computerIds.UnionWith(saved.Computers.Select(computer => computer.Id));
                 saved.ComputerCount = computerIds.Count;
 
