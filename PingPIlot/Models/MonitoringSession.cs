@@ -10,11 +10,18 @@ public sealed class MonitoringSession
     public DateTime? EndedAt { get; set; }
     public Guid GroupId { get; set; }
     public string GroupName { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Comment { get; set; } = "";
     public long EntryCount { get; set; }
     public int ComputerCount { get; set; }
     public double? AverageLatencyMs { get; set; }
     public double? LossPercent { get; set; }
     public List<SessionComputerSnapshot> Computers { get; set; } = new();
+
+    [JsonIgnore]
+    public string DisplayName => string.IsNullOrWhiteSpace(Name)
+        ? $"Сессия от {StartedAt:dd.MM.yyyy HH:mm}"
+        : Name;
 
     [JsonIgnore]
     public string DurationText

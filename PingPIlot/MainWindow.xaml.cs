@@ -704,6 +704,10 @@ public partial class MainWindow : Window
             // Плитка не уведомляет интерфейс на каждый пакет: за 100 мс их приходит
             // до десятка, а перерисовка нужна одна — после всей пачки.
             pending.Tile.Apply(pending.Result, pending.CompletedAt, notify: false);
+            _groupHistory.Add(
+                pending.Tile.Computer.GroupId,
+                pending.CompletedAt,
+                pending.Result.Ok ? pending.Result.LatencyMs : null);
 
             touched ??= new List<DashboardTile>();
             if (!touched.Contains(pending.Tile))
@@ -846,6 +850,7 @@ public partial class MainWindow : Window
 
             Interlocked.Exchange(ref _pendingLiveCount, 0);
             _liveSessionEntries.Clear();
+            _groupHistory.Reset();
             Interlocked.Exchange(ref _sessionWriteErrorShown, 0);
 
             // 4. Плитки: история, счётчики, потери, графики.
@@ -1296,9 +1301,7 @@ public partial class MainWindow : Window
 
         if (added > 0 && _showingCurrentSessionView)
         {
-            SetSessionGroupChart(CurrentGroup == null
-                ? Array.Empty<SessionLogEntry>()
-                : _liveSessionEntries.Where(entry => entry.GroupId == CurrentGroup.Id));
+            SetCurrentSessionGroupChart(SessionGroupCombinedChart);
             UpdateCurrentSessionHeader();
         }
     }
@@ -1344,9 +1347,7 @@ public partial class MainWindow : Window
         SessionTileList.ItemsSource = _tiles;
         SessionRecordsGrid.ItemsSource = _liveSessionView;
         _liveSessionView?.Refresh();
-        SetSessionGroupChart(CurrentGroup == null
-            ? Array.Empty<SessionLogEntry>()
-            : _liveSessionEntries.Where(entry => entry.GroupId == CurrentGroup.Id));
+        SetCurrentSessionGroupChart(SessionGroupCombinedChart);
 
         if (_observedSessionGraphTile == null || !_tiles.Contains(_observedSessionGraphTile))
             SetSessionGraphTile(_tiles.FirstOrDefault());
@@ -1484,7 +1485,7 @@ public partial class MainWindow : Window
             return;
 
         _showingCurrentSessionView = false;
-        SessionViewHeaderText.Text = $"Загрузка сессии от {session.StartedAt:dd.MM.yyyy HH:mm:ss}…";
+        SessionViewHeaderText.Text = $"Загрузка: {session.DisplayName}…";
         try
         {
             IReadOnlyList<SessionLogEntry> entries =
@@ -1500,14 +1501,42 @@ public partial class MainWindow : Window
             string groupName = string.IsNullOrWhiteSpace(session.GroupName)
                 ? entries.FirstOrDefault()?.GroupName ?? "не указана"
                 : session.GroupName;
+            string commentSuffix = string.IsNullOrWhiteSpace(session.Comment)
+                ? ""
+                : $" · комментарий: {session.Comment}";
             SessionViewHeaderText.Text =
-                $"Сессия от {session.StartedAt:dd.MM.yyyy HH:mm:ss} · группа: {groupName} · " +
+                $"{session.DisplayName} · {session.StartedAt:dd.MM.yyyy HH:mm:ss} · группа: {groupName} · " +
                 $"записей: {entries.Count} · компьютеров: {session.ComputerCount} · длительность: {session.DurationText} · " +
-                FormatSessionStats(entries);
+                FormatSessionStats(entries) + commentSuffix;
         }
         catch (Exception ex)
         {
             ShowError("Не удалось открыть сессию.", ex);
+        }
+    }
+
+    private void EditSessionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (SessionsGrid.SelectedItem is not MonitoringSession session)
+        {
+            ShowWarning("Сначала выберите сохранённую сессию.");
+            return;
+        }
+
+        (string Name, string Comment)? details =
+            Dialogs.AskSessionDetails(this, session.Name, session.Comment);
+        if (details is not { } updated)
+            return;
+
+        try
+        {
+            _sessionStore.UpdateSessionDetails(session, updated.Name, updated.Comment);
+            RefreshSavedSessionsList();
+            SessionsGrid.SelectedItem = _savedSessions.FirstOrDefault(item => item.Id == session.Id);
+        }
+        catch (Exception ex)
+        {
+            ShowError("Не удалось изменить данные сессии.", ex);
         }
     }
 
@@ -1556,6 +1585,10 @@ public partial class MainWindow : Window
             return;
         }
 
+        (string Name, string Comment)? details = Dialogs.AskSessionDetails(this);
+        if (details is not { } sessionDetails)
+            return;
+
         try
         {
             // Дописываем уже принятые результаты, чтобы они попали в сохраняемую сессию.
@@ -1564,7 +1597,13 @@ public partial class MainWindow : Window
 
             List<SessionComputerSnapshot> computers = BuildSessionSnapshots(group);
             MonitoringSession? saved = await Task.Run(() =>
-                _sessionStore.SaveSnapshot(_currentSession, group.Id, group.Name, computers));
+                _sessionStore.SaveSnapshot(
+                    _currentSession,
+                    group.Id,
+                    group.Name,
+                    computers,
+                    sessionDetails.Name,
+                    sessionDetails.Comment));
 
             if (saved == null)
             {
@@ -1575,7 +1614,7 @@ public partial class MainWindow : Window
             RefreshSavedSessionsList();
             MessageBox.Show(
                 this,
-                $"Сессия сохранена.\n\nГруппа: {group.Name}\nЗаписей: {saved.EntryCount}\n" +
+                 $"Сессия «{saved.DisplayName}» сохранена.\n\nГруппа: {group.Name}\nЗаписей: {saved.EntryCount}\n" +
                 $"Компьютеров: {saved.ComputerCount}\nСредний ping: {(saved.AverageLatencyMs is double average ? $"{average:F0} ms" : "—")}\n" +
                 $"Потери: {(saved.LossPercent is double loss ? $"{loss:F1}%" : "—")}",
                 "PingPilot — сессия сохранена",

@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Threading;
 using Clipboard = System.Windows.Clipboard;
 using PingPilot.Services;
 
@@ -51,7 +52,24 @@ public partial class MainWindow
         if (sender is not FrameworkElement { Tag: string address } || address.Contains(' '))
             return;
 
-        try { Clipboard.SetText(address); }
+        try
+        {
+            Clipboard.SetText(address);
+
+            if (sender is FrameworkElement element)
+            {
+                const string copyHint = "Нажмите, чтобы скопировать IP-адрес";
+                element.ToolTip = "Скопировано в буфер обмена";
+
+                var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                timer.Tick += (_, _) =>
+                {
+                    element.ToolTip = copyHint;
+                    timer.Stop();
+                };
+                timer.Start();
+            }
+        }
         catch { /* буфер обмена может быть занят другим приложением */ }
     }
 }

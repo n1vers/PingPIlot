@@ -24,6 +24,35 @@ public static class Dialogs
         return ok ? name.Text.Trim() : null;
     }
 
+    public static (string Name, string Comment)? AskSessionDetails(
+        Window owner, string? initialName = null, string? initialComment = null)
+    {
+        var name = new TextBox { Text = initialName ?? string.Empty };
+        var comment = new TextBox
+        {
+            Text = initialComment ?? string.Empty,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            MinHeight = 80,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        };
+
+        bool ok = Show(owner,
+            initialName == null && initialComment == null ? "Новая сессия" : "Изменить сессию",
+            "Сохранить",
+            new[]
+            {
+                ("Название (необязательно)", (Control)name),
+                ("Комментарий (необязательно)", (Control)comment)
+            },
+            () => name.Text.Trim().Length == 0 && comment.Text.Trim().Length == 0
+                ? "Введите название или комментарий."
+                : null,
+            name);
+
+        return ok ? (name.Text.Trim(), comment.Text.Trim()) : null;
+    }
+
     /// <summary>
     /// Окно добавления компьютеров «подряд»: Enter или «Добавить» сохраняет компьютер
     /// и очищает поля, окно остаётся открытым. «Добавить и закрыть» сохраняет и закрывает.

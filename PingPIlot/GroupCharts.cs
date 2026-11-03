@@ -228,7 +228,10 @@ public class GroupCombinedChart : FrameworkElement
         string lossText = index < _lossPoints.Count
             ? $"Потери: {_lossPoints[index].Lost}/{_lossPoints[index].Total}"
             : "Потери: нет данных";
-        HoverChanged?.Invoke($"{averageText} · {lossText}");
+        DateTime? time = index < _averagePoints.Count ? _averagePoints[index].Time
+            : index < _lossPoints.Count ? _lossPoints[index].Time : null;
+        string timeText = time is DateTime t ? $"{t:HH:mm:ss} · " : "";
+        HoverChanged?.Invoke($"{timeText}{averageText} · {lossText}");
         InvalidateVisual();
     }
 

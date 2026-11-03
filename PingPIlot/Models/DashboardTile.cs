@@ -167,6 +167,33 @@ public class DashboardTile : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Для плитки на дашборде: с какого момента держится текущее состояние и сколько оно длится.
+    /// Если пинга нет — «Нет пинга с 08:55:12 · 00:05:12», вместо времени последней проверки.
+    /// </summary>
+    public string StateSinceText
+    {
+        get
+        {
+            if (_stateSince is not { } since || IsOnline is null)
+                return "Ещё не проверялся";
+
+            string from = since.Date == DateTime.Today ? since.ToString("HH:mm:ss") : since.ToString("dd.MM HH:mm:ss");
+            string duration = FormatSpan(DateTime.Now - since);
+            return IsOnline == true
+                ? $"Онлайн с {from} · {duration}"
+                : $"Нет пинга с {from} · {duration}";
+        }
+    }
+
+    /// <summary>Цвет состояния для плитки: недоступный компьютер всегда красный.</summary>
+    public Brush StateBrush => IsOnline switch
+    {
+        true => StatusBrush,
+        false => PingPalette.Poor,
+        _ => PingPalette.Neutral
+    };
+
     public string LatencyStatsText
     {
         get

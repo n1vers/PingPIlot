@@ -284,7 +284,9 @@ public sealed class SessionStoreService : IDisposable
         MonitoringSession active,
         Guid groupId,
         string groupName,
-        IReadOnlyCollection<SessionComputerSnapshot> computers)
+        IReadOnlyCollection<SessionComputerSnapshot> computers,
+        string name,
+        string comment)
     {
         lock (_sync)
         {
@@ -303,6 +305,8 @@ public sealed class SessionStoreService : IDisposable
                 EndedAt = DateTime.Now,
                 GroupId = groupId,
                 GroupName = groupName,
+                Name = name,
+                Comment = comment,
                 Computers = computers.ToList()
             };
 
@@ -464,6 +468,38 @@ public sealed class SessionStoreService : IDisposable
         }
 
         return entries.OrderByDescending(entry => entry.Timestamp).ToList();
+    }
+
+    public void UpdateSessionDetails(MonitoringSession session, string name, string comment)
+    {
+        lock (_sync)
+        {
+            string metadataPath = GetMetadataPath(session.Id);
+            string metadataTempPath = metadataPath + ".tmp";
+            string originalName = session.Name;
+            string originalComment = session.Comment;
+
+            session.Name = name;
+            session.Comment = comment;
+
+            try
+            {
+                File.WriteAllText(
+                    metadataTempPath,
+                    JsonSerializer.Serialize(session, _jsonOptions),
+                    new UTF8Encoding(false));
+                File.Move(metadataTempPath, metadataPath, overwrite: true);
+            }
+            catch
+            {
+                if (File.Exists(metadataTempPath))
+                    File.Delete(metadataTempPath);
+
+                session.Name = originalName;
+                session.Comment = originalComment;
+                throw;
+            }
+        }
     }
 
     public void DeleteSession(Guid sessionId)

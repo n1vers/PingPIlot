@@ -14,16 +14,26 @@
     <Window.Resources>
         <!-- Плашка «имя интерфейса + адрес»: для Local IP и шлюза. Клик копирует адрес. -->
         <DataTemplate x:Key="AddressChipTemplate">
-            <Border Background="{DynamicResource SurfaceBrush}"
-                    BorderBrush="{DynamicResource LineBrush}"
-                    BorderThickness="1"
+            <Border BorderThickness="1"
                     CornerRadius="8"
                     Padding="8,4"
                     Margin="0,0,6,4"
                     Cursor="Hand"
-                    ToolTip="Нажмите, чтобы скопировать адрес"
+                    ToolTip="Нажмите, чтобы скопировать IP-адрес"
                     Tag="{Binding Address}"
                     MouseLeftButtonUp="LocalIpChip_Click">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="{DynamicResource SurfaceBrush}"/>
+                        <Setter Property="BorderBrush" Value="{DynamicResource LineBrush}"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                <Setter Property="Background" Value="#263B82F6"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
                 <StackPanel Orientation="Horizontal">
                     <TextBlock Text="{Binding Name}"
                                Foreground="{DynamicResource MutedBrush}"
@@ -139,19 +149,25 @@
                                                         Background="{DynamicResource SurfaceBrush}"
                                                         BorderBrush="{DynamicResource LineBrush}"
                                                         BorderThickness="1"
-                                                        CornerRadius="8"
+                                                        CornerRadius="10"
                                                         Padding="{TemplateBinding Padding}">
                                                     <ContentPresenter VerticalAlignment="Center"/>
                                                 </Border>
                                                 <ControlTemplate.Triggers>
                                                     <Trigger Property="IsMouseOver" Value="True">
                                                         <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Surface2Brush}"/>
+                                                        <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource MutedBrush}"/>
                                                         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
                                                     </Trigger>
                                                     <Trigger Property="IsSelected" Value="True">
                                                         <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
                                                         <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
                                                         <Setter Property="Foreground" Value="White"/>
+                                                        <Setter TargetName="Bd" Property="Effect">
+                                                            <Setter.Value>
+                                                                <DropShadowEffect Color="#3B82F6" BlurRadius="12" ShadowDepth="0" Opacity="0.4"/>
+                                                            </Setter.Value>
+                                                        </Setter>
                                                     </Trigger>
                                                 </ControlTemplate.Triggers>
                                             </ControlTemplate>
@@ -177,32 +193,33 @@
                         </WrapPanel>
                     </Grid>
 
-                    <!-- Основные действия дашборда. -->
-                    <Grid Grid.Row="1">
-                        <StackPanel Orientation="Horizontal"
-                                    HorizontalAlignment="Right">
-                            <Button Content="Сохранить сессию"
-                                    MinWidth="160"
-                                    Margin="0,0,10,0"
-                                    ToolTip="Сохранить журнал выбранной группы как отдельную сессию. Мониторинг продолжится"
-                                    Click="SaveSessionButton_Click"/>
-                            <Button x:Name="ResetStatsButton"
-                                    Content="Сбросить статистику"
-                                    MinWidth="170"
-                                    Margin="0,0,10,0"
-                                    ToolTip="Очистить графики, счётчики потерь и журнал текущей сессии и начать статистику заново"
-                                    Click="ResetStatsButton_Click"/>
-                            <Button x:Name="RefreshAllButton"
-                                    Content="Проверить все"
-                                    MinWidth="150"
-                                    Margin="0,0,10,0"
-                                    ToolTip="Заново спросить DNS и проверить все компьютеры (во всех группах)"
-                                    Click="RefreshButton_Click"/>
-                            <Button Content="+ Компьютер"
-                                    Style="{StaticResource PrimaryButton}"
-                                    Click="AddComputerButton_Click"/>
-                        </StackPanel>
-                    </Grid>
+                    <!-- Основные действия дашборда: главное действие выделено, опасное — с красным акцентом. -->
+                    <WrapPanel Grid.Row="1"
+                               Orientation="Horizontal"
+                               HorizontalAlignment="Right">
+                        <Button Content="Сохранить сессию"
+                                MinWidth="160"
+                                Margin="0,0,10,6"
+                                ToolTip="Сохранить журнал выбранной группы как отдельную сессию. Мониторинг продолжится"
+                                Click="SaveSessionButton_Click"/>
+                        <Button x:Name="ResetStatsButton"
+                                Content="Сбросить статистику"
+                                Style="{StaticResource DangerOutlineButton}"
+                                MinWidth="170"
+                                Margin="0,0,10,6"
+                                ToolTip="Очистить графики, счётчики потерь и журнал текущей сессии и начать статистику заново"
+                                Click="ResetStatsButton_Click"/>
+                        <Button x:Name="RefreshAllButton"
+                                Content="Проверить все"
+                                MinWidth="150"
+                                Margin="0,0,10,6"
+                                ToolTip="Заново спросить DNS и проверить все компьютеры (во всех группах)"
+                                Click="RefreshButton_Click"/>
+                        <Button Content="+ Компьютер"
+                                Style="{StaticResource PrimaryButton}"
+                                Margin="0,0,0,6"
+                                Click="AddComputerButton_Click"/>
+                    </WrapPanel>
 
                     <!-- Сводка занимает всю ширину и переносится по словам. -->
                     <TextBlock x:Name="SummaryText"
@@ -213,7 +230,8 @@
                                TextWrapping="Wrap"/>
 
                     <!-- Вид и сортировка переносятся, если окно узкое. -->
-                    <WrapPanel Grid.Row="3" Margin="0,6,0,0" Orientation="Horizontal">
+<Border Grid.Row="3" Style="{StaticResource Card}" Padding="14,8" Margin="0,6,0,0">
+                        <WrapPanel Orientation="Horizontal">
                         <TextBlock Text="Вид"
                                    Foreground="{DynamicResource MutedBrush}"
                                    VerticalAlignment="Center"
@@ -239,6 +257,7 @@
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,0"/>
                         <ComboBox x:Name="SortCombo"
+                                  VerticalAlignment="Center"
                                   Width="280"
                                   SelectedIndex="0"
                                   SelectionChanged="SortCombo_SelectionChanged">
@@ -274,11 +293,12 @@
                                 ToolTip="Увеличить (Ctrl + колесо вверх)"
                                 Click="ZoomInButton_Click"/>
                     </WrapPanel>
+                    </Border>
                 </Grid>
 
                 <!-- Комбинированный график группы: средний ping и PDO на разных шкалах. -->
-                <Grid Grid.Row="2" Height="100" Margin="0,0,0,8">
-                    <Border Style="{StaticResource Card}" Padding="8,6,8,4">
+                <Grid Grid.Row="2" Height="130" Margin="0,0,0,8">
+                    <Border Style="{StaticResource Card}" Padding="12,8,12,6">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -307,7 +327,7 @@
                                     <!-- Колонки и размер плиток подбираются под ширину окна. -->
                                     <local:ResponsiveTilePanel MinTileWidth="250"
                                                                MaxTileWidth="440"
-                                                               MinTileHeight="230"
+                                                               MinTileHeight="256"
                                                                HeightRatio="0.82"
                                                                Spacing="10"/>
                                 </ItemsPanelTemplate>
@@ -340,11 +360,29 @@
                                             </Grid.RowDefinitions>
 
                                             <!-- Цветная полоса сверху: статус виден с первого взгляда. -->
-                                            <Border Background="{Binding StatusBrush}"
-                                                    CornerRadius="9,9,0,0"/>
+                                            <Border Background="{Binding StateBrush}"
+                                                    CornerRadius="11,11,0,0"/>
+
+                                            <!-- Лёгкий фон, пока у компьютера нет пинга. -->
+                                            <Border Grid.RowSpan="2"
+                                                    IsHitTestVisible="False"
+                                                    Background="#14EF4444"
+                                                    CornerRadius="12">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsOnline}" Value="False">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                            </Border>
 
                                             <Grid Grid.Row="1" Margin="12,8,12,10">
                                                 <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="Auto"/>
                                                     <RowDefinition Height="Auto"/>
@@ -444,22 +482,26 @@
                                                     </StackPanel>
                                                 </Grid>
 
-                                                <StackPanel Grid.Row="4"
-                                                            Orientation="Horizontal"
-                                                            Margin="0,4,0,0">
-                                                    <TextBlock Text="{Binding PacketLossText}"
-                                                               Foreground="{DynamicResource MutedBrush}"
-                                                               FontSize="12"/>
-                                                    <TextBlock Text="·"
-                                                               Foreground="{DynamicResource MutedBrush}"
+                                                <!-- С какого момента пропал пинг (или идёт онлайн) и сколько это длится. -->
+                                                <Grid Grid.Row="4" Margin="0,8,0,0" HorizontalAlignment="Left">
+                                                    <Border Background="{Binding StateBrush}" Opacity="0.2" CornerRadius="7"/>
+                                                    <Border BorderBrush="{Binding StateBrush}" BorderThickness="1"
+                                                            Opacity="0.65" CornerRadius="7"/>
+                                                    <TextBlock Text="{Binding StateSinceText}"
+                                                               Foreground="{DynamicResource TextBrush}"
                                                                FontSize="12"
-                                                               Margin="8,0,8,0"/>
-                                                    <TextBlock Text="{Binding LastCheckedText}"
-                                                               Foreground="{DynamicResource MutedBrush}"
-                                                               FontSize="12"/>
-                                                </StackPanel>
+                                                               FontWeight="SemiBold"
+                                                               Margin="9,3,9,3"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                </Grid>
 
-                                                <Grid Grid.Row="5" Margin="0,4,0,0" MinHeight="70" ClipToBounds="True">
+                                                <TextBlock Grid.Row="5"
+                                                           Text="{Binding PacketLossText}"
+                                                           Foreground="{DynamicResource MutedBrush}"
+                                                           FontSize="12"
+                                                           Margin="0,6,0,0"/>
+
+                                                <Grid Grid.Row="6" Margin="0,4,0,0" MinHeight="70" ClipToBounds="True">
                                                     <local:PingGraph Tile="{Binding}" IsHitTestVisible="False">
                                                         <local:PingGraph.Style>
                                                             <Style TargetType="local:PingGraph">
@@ -669,6 +711,9 @@
                         <Button Content="Обновить"
                                 Margin="10,0,0,0"
                                 Click="RefreshSessionsButton_Click"/>
+                        <Button Content="Изменить"
+                                Margin="10,0,0,0"
+                                Click="EditSessionButton_Click"/>
                         <Button Content="Удалить сессию"
                                 Style="{StaticResource DangerButton}"
                                 Margin="10,0,0,0"
@@ -694,9 +739,15 @@
                               SelectionMode="Single"
                               SelectionChanged="SessionsGrid_SelectionChanged">
                         <DataGrid.Columns>
+                            <DataGridTextColumn Header="Название"
+                                                Binding="{Binding DisplayName}"
+                                                SortMemberPath="Name" Width="220"/>
+                            <DataGridTextColumn Header="Комментарий"
+                                                Binding="{Binding Comment}"
+                                                Width="*"/>
                             <DataGridTextColumn Header="Группа"
                                                 Binding="{Binding GroupName}"
-                                                SortMemberPath="GroupName" Width="*"/>
+                                                SortMemberPath="GroupName" Width="180"/>
                             <DataGridTextColumn Header="Начало"
                                                 Binding="{Binding StartedAt, StringFormat={}{0:dd.MM.yyyy HH:mm:ss}}"
                                                 SortMemberPath="StartedAt" Width="170"/>

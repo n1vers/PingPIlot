@@ -6,8 +6,11 @@ namespace PingPilot;
 // Маленькие графики выбранной группы на дашборде: потери (PDO) и средний ping.
 public partial class MainWindow
 {
-    // Сколько последних интервалов усреднения показывает график.
-    private const int ChartPoints = 120;
+    // Максимум точек на графике. Если сессия длиннее, соседние интервалы объединяются,
+    // и график всё равно показывает всю сессию целиком.
+    private const int ChartPoints = 600;
+
+    private readonly GroupChartHistory _groupHistory = new();
 
     private readonly DispatcherTimer _chartsTimer = new(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(1) };
 
@@ -39,80 +42,28 @@ public partial class MainWindow
             return;
 
         string groupName = CurrentGroup?.Name ?? "—";
-        int seconds = ChartPoints * PingStats.AverageIntervalSeconds;
-        string period = seconds >= 120 ? $"{seconds / 60} мин" : $"{seconds} с";
-        GroupChartTitle.Text = $"ГРУППА «{groupName}» · средний ping и PDO, последние {period}";
+        GroupChartTitle.Text = $"ГРУППА «{groupName}» · средний ping и PDO, вся сессия с {_currentSession.StartedAt:HH:mm:ss}";
 
-        DashboardTile[] tiles = _tiles.ToArray();
-        long windowTicks = TimeSpan.FromSeconds(PingStats.AverageIntervalSeconds).Ticks;
+        SetCurrentSessionGroupChart(GroupCombinedChartControl);
+    }
 
-        // Интервалы привязаны к абсолютному времени, поэтому у всех компьютеров они совпадают.
-        var buckets = new SortedDictionary<long, (long Sum, int Ok, int Total)>();
-        foreach (DashboardTile tile in tiles)
+    // Вся текущая сессия выбранной группы: данные копятся отдельно от истории плиток
+    // и журнала на экране, поэтому ничего не обрезается и график сразу полный.
+    private void SetCurrentSessionGroupChart(GroupCombinedChart chart)
+    {
+        if (CurrentGroup is not { } group)
         {
-            foreach (PingSample sample in tile.GetHistory())
-            {
-                long bucket = sample.Time.Ticks / windowTicks;
-                buckets.TryGetValue(bucket, out (long Sum, int Ok, int Total) current);
-                current.Total++;
-                if (sample.LatencyMs is long ms)
-                {
-                    current.Sum += ms;
-                    current.Ok++;
-                }
-
-                buckets[bucket] = current;
-            }
+            chart.SetData(Array.Empty<GroupLossPoint>(), Array.Empty<GroupAveragePoint>());
+            return;
         }
 
-        var recent = buckets.TakeLast(ChartPoints).ToArray();
-
-        GroupLossPoint[] lossPoints = recent
-            .Select(pair => new GroupLossPoint(
-                new DateTime(pair.Key * windowTicks), pair.Value.Total - pair.Value.Ok, pair.Value.Total))
-            .ToArray();
-
-        GroupAveragePoint[] averagePoints = recent
-            .Select(pair => new GroupAveragePoint(
-                new DateTime(pair.Key * windowTicks),
-                pair.Value.Ok > 0 ? (double)pair.Value.Sum / pair.Value.Ok : null))
-            .ToArray();
-
-        GroupCombinedChartControl.SetData(lossPoints, averagePoints);
+        var (lossPoints, averagePoints) = _groupHistory.Build(group.Id, ChartPoints);
+        chart.SetData(lossPoints, averagePoints);
     }
 
     private void SetSessionGroupChart(IEnumerable<SessionLogEntry> entries)
     {
-        long windowTicks = TimeSpan.FromSeconds(PingStats.AverageIntervalSeconds).Ticks;
-        var buckets = new SortedDictionary<long, (long Sum, int Ok, int Total)>();
-
-        foreach (SessionLogEntry entry in entries)
-        {
-            long bucket = entry.Timestamp.Ticks / windowTicks;
-            buckets.TryGetValue(bucket, out (long Sum, int Ok, int Total) current);
-            current.Total++;
-            if (entry.LatencyMs is long latency)
-            {
-                current.Sum += latency;
-                current.Ok++;
-            }
-
-            buckets[bucket] = current;
-        }
-
-        var recent = buckets.TakeLast(ChartPoints).ToArray();
-        GroupLossPoint[] lossPoints = recent
-            .Select(pair => new GroupLossPoint(
-                new DateTime(pair.Key * windowTicks),
-                pair.Value.Total - pair.Value.Ok,
-                pair.Value.Total))
-            .ToArray();
-        GroupAveragePoint[] averagePoints = recent
-            .Select(pair => new GroupAveragePoint(
-                new DateTime(pair.Key * windowTicks),
-                pair.Value.Ok > 0 ? (double)pair.Value.Sum / pair.Value.Ok : null))
-            .ToArray();
-
+        var (lossPoints, averagePoints) = GroupChartHistory.BuildFromEntries(entries, ChartPoints);
         SessionGroupCombinedChart.SetData(lossPoints, averagePoints);
     }
 }
